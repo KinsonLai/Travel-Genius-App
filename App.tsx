@@ -115,7 +115,8 @@ const App: React.FC = () => {
         {step === 'result' && itinerary && !isLoading && (
           <ItineraryView 
             itinerary={itinerary} 
-            travelers={currentPrefs?.travelers || 2} 
+            // Fix: Use travelers from the saved itinerary if available (shared link case), otherwise from current form input
+            travelers={itinerary.travelers || currentPrefs?.travelers || 2} 
             onBack={() => {
                 setStep('input');
                 window.history.pushState({}, '', window.location.pathname);

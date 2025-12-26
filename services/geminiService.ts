@@ -126,11 +126,17 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     // Parse the JSON
     try {
       const data = JSON.parse(cleanJsonString(text)) as ItineraryResult;
+      
       // Double check currency consistency in case AI hallucinates
       if (data.currency !== prefs.budget.currency) {
           console.warn(`AI returned wrong currency ${data.currency}, expected ${prefs.budget.currency}. Overriding label but numbers might be off.`);
           data.currency = prefs.budget.currency;
       }
+
+      // CRITICAL FIX: Inject the traveler count from preferences into the result
+      // This ensures that when the itinerary is saved/shared, we know how many people it was for.
+      data.travelers = prefs.travelers;
+
       return data;
     } catch (e) {
       console.error("Failed to parse JSON:", text);

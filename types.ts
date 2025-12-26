@@ -57,4 +57,5 @@ export interface ItineraryResult {
   summary: string;
   days: DayPlan[];
   exchangeRateUsed?: number;
+  travelers?: number; // Added field to persist traveler count
 }
