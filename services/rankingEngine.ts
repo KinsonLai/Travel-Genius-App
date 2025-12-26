@@ -14,11 +14,24 @@ const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
   return R * c;
 };
 
+// Check if a specific date (YYYY-MM-DD object or string logic) is inside a hotel's stay range
+const isDateInHotelStay = (dateObj: Date, checkInStr: string, checkOutStr: string): boolean => {
+    if (!checkInStr || !checkOutStr) return false;
+    const checkIn = new Date(checkInStr);
+    const checkOut = new Date(checkOutStr);
+    // Reset hours to avoid timezone mess for simple range check
+    checkIn.setHours(0,0,0,0);
+    checkOut.setHours(0,0,0,0);
+    dateObj.setHours(0,0,0,0);
+    
+    return dateObj >= checkIn && dateObj <= checkOut;
+};
+
 // Main Ranking Function
 export const rankCandidates = (
   candidates: CandidatePlace[],
   prefs: UserPreferences,
-  hotelLocation?: { lat: number, lng: number } // Coordinates of the main hotel
+  hotels: Hotel[] // Receive ALL hotels
 ): CandidatePlace[] => {
 
   return candidates.map(place => {
@@ -49,15 +62,32 @@ export const rankCandidates = (
     score += matchScore * 0.4;
 
     // 3. Distance/Logistics Score (Weight: 20%)
-    let distScore = 50; 
-    if (hotelLocation && place.latitude && place.longitude) {
-        const dist = calculateDistance(hotelLocation.lat, hotelLocation.lng, place.latitude, place.longitude);
-        place.distanceFromHotel = parseFloat(dist.toFixed(2));
-        
-        const maxDist = 10; 
-        distScore = Math.max(0, (1 - dist / maxDist) * 100);
-        
-        if (dist < 2) reasons.push(`離酒店近(${place.distanceFromHotel}km)`);
+    // LOGIC UPDATE: Calculate distance to the NEAREST hotel in the list.
+    // This allows spots in City B (Hotel B) to rank high even if Hotel A is far away.
+    let minDistance = Infinity;
+    let nearestHotelName = "";
+
+    hotels.forEach(h => {
+        if (h.latitude && h.longitude && place.latitude && place.longitude) {
+            const d = calculateDistance(h.latitude, h.longitude, place.latitude, place.longitude);
+            if (d < minDistance) {
+                minDistance = d;
+                nearestHotelName = h.name;
+            }
+        }
+    });
+
+    let distScore = 0;
+    if (minDistance !== Infinity) {
+        place.distanceFromHotel = parseFloat(minDistance.toFixed(2));
+        // Max comfortable daily radius ~15km, but for inter-city planning we can be lenient.
+        // If it's within 10km of ANY booked hotel, give it good score.
+        const maxDist = 20; 
+        distScore = Math.max(0, (1 - minDistance / maxDist) * 100);
+        if (minDistance < 3) reasons.push(`離${nearestHotelName}很近(${place.distanceFromHotel}km)`);
+    } else {
+        // Fallback if no hotel coords
+        distScore = 50; 
     }
     score += distScore * 0.2;
 
@@ -87,60 +117,89 @@ export const rankCandidates = (
 };
 
 /**
- * 核心演算法：Day-Aware Route Optimization
- * 結合 Graph (最近鄰路徑) 與 Dictionary (營業時間查詢)
+ * 核心演算法：Day-Aware Route Optimization with Multi-Hotel Support
  * 
  * 1. 根據旅行天數，將行程分為 N 天。
- * 2. 針對第 i 天，查詢今天是星期幾。
- * 3. 從候選池中，過濾掉今天沒開的店 (Dictionary Lookup)。
- * 4. 在剩下的可用景點中，執行貪婪路徑搜尋 (Nearest Neighbor)，串接最順路的行程。
+ * 2. 確定當天是「哪間酒店」負責 (根據日期)。
+ * 3. 確定當天的「起始座標」 (若是移動日，可能起點是 Hotel A，終點是 Hotel B，這裡簡化為以當晚住宿 Hotel B 為主，或 Hotel A 為主)。
+ * 4. 過濾出「離當天酒店」較近的候選點 (避免 Day 1 住東京卻跑到大阪的景點)。
+ * 5. TSP/Greedy 排序。
  */
 export const optimizeRoute = (
   candidates: CandidatePlace[],
-  hotelLocation: { lat: number, lng: number },
+  hotels: Hotel[],
   startDateStr: string,
   totalDays: number
 ): CandidatePlace[] => {
-  if (!hotelLocation || candidates.length === 0) return candidates;
+  if (candidates.length === 0) return candidates;
 
   const unvisited = [...candidates];
   const finalOrderedList: CandidatePlace[] = [];
   const startDate = new Date(startDateStr);
   
-  // 為了避免單日塞太多，設定一個軟上限 (可根據節奏調整)
+  // 為了避免單日塞太多，設定一個軟上限
   const MAX_SPOTS_PER_DAY = Math.ceil(candidates.length / totalDays) + 1;
 
   for (let dayNum = 1; dayNum <= totalDays; dayNum++) {
-    // 1. Determine current Day of Week (0-6)
+    // 1. Determine Date and Day of Week
     const currentDate = new Date(startDate);
     currentDate.setDate(startDate.getDate() + (dayNum - 1));
-    const currentDayOfWeek = currentDate.getDay(); // 0 = Sun, 1 = Mon...
+    const currentDayOfWeek = currentDate.getDay(); // 0 = Sun
 
-    // 2. Identify available candidates for this specific day
-    // Using the 'closedDays' dictionary
+    // 2. Determine Active Hotel for this night
+    // Find a hotel where (currentDate >= checkIn) AND (currentDate < checkOut)
+    // Note: Usually checkOut day morning you are still at Hotel A, but evening you are at Hotel B.
+    // Simplification: We assign the hotel you SLEEP at tonight as the anchor, 
+    // OR if it's the last day, the one you checked out from.
+    let activeHotel = hotels.find(h => isDateInHotelStay(currentDate, h.checkIn, h.checkOut));
+    
+    // Fallback logic: If dates have gaps, find the closest previous hotel
+    if (!activeHotel && hotels.length > 0) {
+        // Find last hotel that ends before today
+        activeHotel = hotels[hotels.length - 1]; // Default to last
+    }
+    if (!activeHotel) activeHotel = hotels[0]; // Safety net
+
+    // 3. Filter candidates suitable for THIS hotel's region
+    // We only want to schedule spots that are reasonably close to the current hotel (e.g., within 50km)
+    // UNLESS it's a "transfer day" where we might visit spots along the way. 
+    // To simplify: We prioritize spots close to the current active hotel.
+    
     const availableToday = unvisited.filter(p => {
-       if (!p.closedDays || p.closedDays.length === 0) return true;
-       return !p.closedDays.includes(currentDayOfWeek);
+       // A. Time Constraint Check
+       if (p.closedDays && p.closedDays.includes(currentDayOfWeek)) return false;
+
+       // B. Geographic Constraint Check (Crucial for multi-city)
+       // If the spot is > 100km away from current hotel, assume it belongs to another leg of the trip
+       // Exception: If we only have 1 hotel, ignore this.
+       if (hotels.length > 1 && p.latitude && p.longitude && activeHotel?.latitude && activeHotel?.longitude) {
+           const dist = calculateDistance(activeHotel.latitude, activeHotel.longitude, p.latitude, p.longitude);
+           if (dist > 80) return false; // 80km threshold (e.g. Tokyo to Osaka is ~400km, so this filters correctly)
+       }
+
+       return true;
     });
 
     if (availableToday.length === 0) continue;
 
-    // 3. Graph Search: Build a route for today using Nearest Neighbor
-    let currentLoc = hotelLocation;
-    let spotsTodayCount = 0;
+    // 4. Graph Search (Nearest Neighbor)
+    // Start from the Hotel
+    let currentLoc = { lat: activeHotel.latitude || 0, lng: activeHotel.longitude || 0 };
     
-    // Create a local mutable copy for today's pathfinding
-    const todaysPool = [...availableToday];
+    // Safety: if hotel has no coords, assume first candidate's location to start chain
+    if (currentLoc.lat === 0 && availableToday.length > 0) {
+        currentLoc = { lat: availableToday[0].latitude, lng: availableToday[0].longitude };
+    }
+
+    let spotsTodayCount = 0;
+    const todaysPool = [...availableToday]; // Local mutable copy
 
     while (todaysPool.length > 0 && spotsTodayCount < MAX_SPOTS_PER_DAY) {
         let nearestIdx = -1;
         let minDist = Infinity;
 
-        // Find nearest neighbor in today's pool
         for (let i = 0; i < todaysPool.length; i++) {
             const candidate = todaysPool[i];
-            if (!candidate.latitude || !candidate.longitude) continue;
-
             const dist = calculateDistance(
                 currentLoc.lat,
                 currentLoc.lng,
@@ -157,18 +216,15 @@ export const optimizeRoute = (
         if (nearestIdx !== -1) {
             const bestPlace = todaysPool[nearestIdx];
             
-            // Mark assigned info
             bestPlace.suggestedDay = dayNum; 
-            if (bestPlace.closedDays && bestPlace.closedDays.length > 0) {
-               bestPlace.matchReason += ` | 自動安排於Day ${dayNum} (避開公休)`;
-            }
+            bestPlace.matchReason += ` | Day ${dayNum} (${activeHotel?.name}周邊)`;
 
             finalOrderedList.push(bestPlace);
             
-            // Update Location to this place (Greedy Chain)
+            // Move current location to this spot
             currentLoc = { lat: bestPlace.latitude, lng: bestPlace.longitude };
             
-            // Remove from global unvisited and local pool
+            // Remove from unvisited (Global) & pool (Local)
             const globalIdx = unvisited.findIndex(p => p.name === bestPlace.name);
             if (globalIdx !== -1) unvisited.splice(globalIdx, 1);
             
@@ -180,12 +236,13 @@ export const optimizeRoute = (
     }
   }
 
-  // 4. Handle leftovers (impossible constraints or overflow)
-  // Just append them at the end so they aren't lost, let AI decide or warn
+  // 5. Handle Leftovers
+  // These are likely spots that were valid but didn't fit in the days, OR spots that were far from ALL hotels (data error?)
   if (unvisited.length > 0) {
       unvisited.forEach(p => {
-          p.suggestedDay = totalDays; // Push to last day
-          p.matchReason += " | 候補行程";
+          // Just assign to Day 1 or find best fit day (omitted for brevity, dumping to Day 1 or Last Day)
+          p.suggestedDay = totalDays; 
+          p.matchReason += " | 候補/距離過遠";
           finalOrderedList.push(p);
       });
   }

@@ -1,6 +1,6 @@
 
 import { GoogleGenAI } from "@google/genai";
-import { UserPreferences, ItineraryResult, CandidatePlace } from "../types";
+import { UserPreferences, ItineraryResult, CandidatePlace, Hotel } from "../types";
 import { rankCandidates, optimizeRoute } from "./rankingEngine";
 
 // Helper to clean JSON string
@@ -30,21 +30,35 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   const end = new Date(prefs.dates.end);
   const totalDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 3600 * 24)) + 1;
 
+  // Format hotel list for prompt
+  const hotelsListStr = prefs.hotels.map((h, i) => 
+    `酒店${i+1}: ${h.name} (位置: ${h.location}, 日期: ${h.checkIn}~${h.checkOut})`
+  ).join('\n');
+
   // ==========================================
   // STAGE 1: Candidate Search (Use Flash)
   // ==========================================
   console.log("Stage 1: Fetching raw candidates (Using Flash)...");
   
   const step1Prompt = `
-    任務：針對以下需求搜尋 20 個推薦地點。
-    資訊：${prefs.airport}, 住宿 ${prefs.hotels[0].name}, 風格 ${prefs.style.focus}。
+    任務：針對以下需求搜尋 25 個推薦地點。
+    機場：${prefs.airport}
+    住宿安排 (請根據這些地點周邊搜尋)：
+    ${hotelsListStr}
+    
+    旅遊風格：${prefs.style.focus}
     客製化要求：${prefs.customRequests || '無'}。
     
-    【重要】請務必搜尋該地點的「公休日」與「營業時間」。
+    【重要指令】
+    1. 因為用戶有多個住宿地點，請確保搜尋的景點能**均勻分布**在這些住宿地點周邊，不要只集中在第一間酒店。
+    2. 務必搜尋每一間酒店的經緯度。
+    3. 務必搜尋景點的「公休日」與「營業時間」。
 
     請務必回傳標準 JSON 格式，不要包含任何其他文字或解釋。格式如下：
     {
-      "hotelCoords": { "lat": number, "lng": number },
+      "hotelsData": [
+        { "id": "對應prefs中的hotel id", "name": "酒店名稱", "lat": number, "lng": number }
+      ],
       "candidates": [
         {
           "name": "地點名稱",
@@ -63,7 +77,8 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   `;
 
   let candidates: CandidatePlace[] = [];
-  let hotelCoords = { lat: 0, lng: 0 };
+  // Use a map to store hotel coords temporary
+  let hotelsCoordsMap: Record<string, {lat: number, lng: number}> = {};
 
   try {
       const resp1 = await ai.models.generateContent({
@@ -77,7 +92,19 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
       const rawText = resp1.text || "{}";
       const rawData = JSON.parse(cleanJsonString(rawText));
       candidates = rawData.candidates || [];
-      hotelCoords = rawData.hotelCoords || { lat: 0, lng: 0 };
+      
+      // Map coords back to prefs.hotels
+      const returnedHotels = rawData.hotelsData || [];
+      // We iterate through our original prefs.hotels and try to find coords from AI response
+      // Note: The AI might not return ID perfectly, so we might match by index or assume order
+      prefs.hotels.forEach((h, index) => {
+          // Try to find by name match or index
+          const found = returnedHotels.find((rh: any) => rh.name.includes(h.name)) || returnedHotels[index];
+          if (found && found.lat) {
+              h.latitude = found.lat;
+              h.longitude = found.lng;
+          }
+      });
       
       console.log(`Stage 1 Complete. Found ${candidates.length} candidates.`);
 
@@ -92,17 +119,18 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   // ==========================================
   
   // 1. Scoring (篩選高品質景點)
-  const rankedCandidates = rankCandidates(candidates, prefs, hotelCoords.lat !== 0 ? hotelCoords : undefined);
+  // Now we pass the FULL array of hotels so ranking can check distance to NEAREST hotel
+  const rankedCandidates = rankCandidates(candidates, prefs, prefs.hotels);
   
-  // 取前 16 個最高分景點
-  const topCandidates = rankedCandidates.slice(0, 16); 
+  // 取前 18 個最高分景點 (稍微增加數量以應對多天)
+  const topCandidates = rankedCandidates.slice(0, 18); 
   
   // 2. Graph + Dictionary Algorithm (路徑 + 時間優化)
   // 使用 Day-Aware Nearest Neighbor 算法重新排序並分組
   console.log("Applying Time-Aware Graph optimization...");
   const optimizedCandidates = optimizeRoute(
       topCandidates, 
-      hotelCoords.lat !== 0 ? hotelCoords : {lat:0, lng:0},
+      prefs.hotels, // Pass all hotels with their dates
       prefs.dates.start,
       totalDays
   );
@@ -125,6 +153,9 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
       price: c.priceLevel,
       reason: c.matchReason
   }));
+  
+  // Create a summary of which hotel is used on which day for the prompt
+  const hotelSchedule = prefs.hotels.map(h => `${h.checkIn}至${h.checkOut}: 住 ${h.name}`).join(', ');
 
   const step3Prompt = `
     你是一個專業的旅遊規劃師。請根據以下資訊規劃行程。
@@ -132,6 +163,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     【參數】
     日期: ${prefs.dates.start} ~ ${prefs.dates.end} (${totalDays}天)
     時間: ${prefs.dates.startTime} ~ ${prefs.dates.endTime}
+    住宿安排: ${hotelSchedule} (請確保行程的出發與結束點符合當天的住宿)
     人數: ${prefs.travelers}
     預算: ${prefs.budget.amount} ${prefs.budget.currency}
     交通: ${prefs.style.transportPreference}
@@ -139,13 +171,14 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
 
     【候選名單 (已完成演算法優化)】
     以下名單已經經過「地理路徑(Graph)」與「營業時間(Dictionary)」的演算法驗證。
-    **"day" 欄位代表演算法建議將該景點安排在第幾天，以避開公休並保持順路。**
+    系統已根據住宿位置，將景點分配到適合的日期 (Day)。
+    **請嚴格遵守 "day" 欄位的建議**。
     ${JSON.stringify(minimizedCandidates)}
 
     【核心指令】
-    1. **請嚴格遵守 "day" 欄位的建議**。例如 day:1 的景點請全部安排在 Day 1，不要隨意移動到 Day 2，除非為了午餐/晚餐的邏輯順序微調。
-    2. 同一天的景點順序，請依照列表中的出現順序安排（因為已是最近鄰排序）。
-    3. 必須分配預算 (transportCost, cost)。
+    1. **嚴格遵守 "day" 分配**：演算法已經考慮了酒店位置。例如，若某景點靠近第二間酒店，演算法會將其分配在入住第二間酒店的日期，請勿隨意更動。
+    2. **酒店移動日**：在更換酒店當天 (Check-out A -> Check-in B)，請安排合理的交通移動時間，並建議是否先去酒店放行李或使用車站置物櫃。
+    3. 同一天的景點順序，請依照列表中的出現順序安排。
     4. 回傳完整行程 JSON。
 
     【輸出要求】
