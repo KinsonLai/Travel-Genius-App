@@ -15,13 +15,8 @@ const cleanJsonString = (str: string) => {
 };
 
 export const generateItinerary = async (prefs: UserPreferences): Promise<ItineraryResult> => {
-  // Safe env check
-  let apiKey = "";
-  if (import.meta.env && import.meta.env.VITE_API_KEY) {
-    apiKey = import.meta.env.VITE_API_KEY;
-  } else if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
-    apiKey = process.env.API_KEY;
-  }
+  // Safe env check - ONLY use import.meta.env for browser compatibility
+  const apiKey = import.meta.env.VITE_API_KEY;
   
   if (!apiKey) {
     console.error("API Key is missing. Please check your .env file or Netlify Environment Variables.");

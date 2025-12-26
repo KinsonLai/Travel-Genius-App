@@ -2,15 +2,11 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, getDoc } from "firebase/firestore";
 import { ItineraryResult } from "../types";
 
-// Helper to safely get env vars without crashing in browser (where process is undefined)
-const getEnv = (viteKey: string, processKey: string) => {
-  // 1. Try Vite env (import.meta.env)
+// Helper to safely get env vars using ONLY standard Vite import.meta.env
+// This prevents "ReferenceError: process is not defined" in browsers
+const getEnv = (viteKey: string) => {
   if (import.meta.env && import.meta.env[viteKey]) {
     return import.meta.env[viteKey];
-  }
-  // 2. Try Process env (Safe check)
-  if (typeof process !== 'undefined' && process.env && process.env[processKey]) {
-    return process.env[processKey];
   }
   return "";
 };
@@ -21,14 +17,14 @@ const getEnv = (viteKey: string, processKey: string) => {
 // 變數名稱必須以 VITE_ 開頭
 // ==========================================
 const firebaseConfig = {
-  apiKey: getEnv("VITE_FIREBASE_API_KEY", "FIREBASE_API_KEY"),
-  authDomain: getEnv("VITE_FIREBASE_AUTH_DOMAIN", "FIREBASE_AUTH_DOMAIN"),
-  projectId: getEnv("VITE_FIREBASE_PROJECT_ID", "FIREBASE_PROJECT_ID"),
-  storageBucket: getEnv("VITE_FIREBASE_STORAGE_BUCKET", "FIREBASE_STORAGE_BUCKET"),
-  messagingSenderId: getEnv("VITE_FIREBASE_MESSAGING_SENDER_ID", "FIREBASE_MESSAGING_SENDER_ID"),
-  appId: getEnv("VITE_FIREBASE_APP_ID", "FIREBASE_APP_ID"),
-  measurementId: getEnv("VITE_FIREBASE_MEASUREMENT_ID", "FIREBASE_MEASUREMENT_ID"),
-  databaseURL: getEnv("VITE_FIREBASE_DATABASE_URL", "FIREBASE_DATABASE_URL")
+  apiKey: getEnv("VITE_FIREBASE_API_KEY"),
+  authDomain: getEnv("VITE_FIREBASE_AUTH_DOMAIN"),
+  projectId: getEnv("VITE_FIREBASE_PROJECT_ID"),
+  storageBucket: getEnv("VITE_FIREBASE_STORAGE_BUCKET"),
+  messagingSenderId: getEnv("VITE_FIREBASE_MESSAGING_SENDER_ID"),
+  appId: getEnv("VITE_FIREBASE_APP_ID"),
+  measurementId: getEnv("VITE_FIREBASE_MEASUREMENT_ID"),
+  databaseURL: getEnv("VITE_FIREBASE_DATABASE_URL")
 };
 
 let db: any = null;
