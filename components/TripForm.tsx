@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { UserPreferences, Hotel } from '../types';
 import { CURRENCIES, TRAVEL_STYLES, FOCUS_AREAS, TRANSPORT_PREFS } from '../constants';
-import { Plus, Trash2, MapPin, Calendar, Plane, Wallet, Settings, X, Users } from 'lucide-react';
+import { Plus, Trash2, MapPin, Calendar, Plane, Wallet, Settings, X, Users, MessageSquare } from 'lucide-react';
 import DateRangePicker from './DateRangePicker';
 
 interface TripFormProps {
@@ -19,6 +19,7 @@ const TripForm: React.FC<TripFormProps> = ({ onSubmit, isLoading }) => {
     focus: 'balanced',
     transportPreference: 'balanced',
   });
+  const [customRequests, setCustomRequests] = useState('');
   
   const [hotels, setHotels] = useState<Hotel[]>([
     { id: '1', name: '', location: '', checkIn: '', checkOut: '' }
@@ -119,7 +120,7 @@ const TripForm: React.FC<TripFormProps> = ({ onSubmit, isLoading }) => {
       return;
     }
     e.preventDefault();
-    onSubmit({ dates, travelers, airport, hotels, budget, style });
+    onSubmit({ dates, travelers, airport, hotels, budget, style, customRequests });
   };
 
   return (
@@ -291,6 +292,22 @@ const TripForm: React.FC<TripFormProps> = ({ onSubmit, isLoading }) => {
                 {TRANSPORT_PREFS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
               </select>
             </div>
+
+            {/* NEW: Custom Request Section */}
+            <div className="md:col-span-2">
+              <label className="block text-sm font-medium text-slate-300 mb-2 flex items-center gap-2">
+                 <MessageSquare className="w-4 h-4 text-yellow-500" />
+                 客製化要求 / 一日遊規劃
+              </label>
+              <textarea 
+                className="w-full p-3 bg-slate-700 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:ring-2 focus:ring-blue-500 outline-none h-24 resize-none"
+                placeholder="例如：雖然住在福岡，但我想安排一天去熊本一日遊 (即日來回)；或者：我想要有一天去滑雪；特別想吃某間特定的餐廳..."
+                value={customRequests}
+                onChange={e => setCustomRequests(e.target.value)}
+              />
+              <p className="text-xs text-slate-500 mt-1">AI 會優先遵守此處的特別指令進行規劃。</p>
+            </div>
+
           </div>
         </section>
 

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ItineraryResult } from '../types';
-import { DollarSign, Navigation, ExternalLink, Printer, Map as MapIcon, List, Users, Share2, MapPin, Check, Download, Info } from 'lucide-react';
+import { DollarSign, Navigation, ExternalLink, Printer, Map as MapIcon, List, Users, Share2, MapPin, Check, Download, Info, Lightbulb, Tag } from 'lucide-react';
 import { triggerBrowserPrint } from '../utils/pdfGenerator';
 import { downloadKML } from '../utils/kmlGenerator';
 import { saveItineraryToCloud } from '../services/storageService';
@@ -248,9 +248,6 @@ const ItineraryView: React.FC<ItineraryViewProps> = ({ itinerary, travelers, onB
 
               <div className="space-y-6 md:space-y-8">
                 {day.activities.map((activity, idx) => {
-                  const itemTotal = (activity.cost + (activity.transportCost || 0)) * travelers;
-                  const itemPerPerson = activity.cost + (activity.transportCost || 0);
-                  
                   return (
                   <div key={idx} className="relative flex flex-col md:flex-row gap-4 md:gap-8 group print:gap-4">
                     
@@ -284,6 +281,27 @@ const ItineraryView: React.FC<ItineraryViewProps> = ({ itinerary, travelers, onB
                         </div>
                       </div>
                       
+                      {/* NEW: Reasoning & Tags Section */}
+                      {(activity.reasoning || (activity.matchTags && activity.matchTags.length > 0)) && (
+                        <div className="mt-3 mb-2 bg-slate-800/60 p-3 rounded border-l-2 border-blue-400 print:bg-gray-50 print:border-blue-600">
+                          {activity.reasoning && (
+                            <div className="flex items-start gap-2 mb-2 text-sm text-blue-200 print:text-blue-800">
+                              <Lightbulb className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                              <p>{activity.reasoning}</p>
+                            </div>
+                          )}
+                          {activity.matchTags && activity.matchTags.length > 0 && (
+                            <div className="flex flex-wrap gap-2">
+                              {activity.matchTags.map((tag, tIdx) => (
+                                <span key={tIdx} className="inline-flex items-center gap-1 text-xs bg-slate-600 text-slate-300 px-2 py-0.5 rounded-full print:bg-gray-200 print:text-black">
+                                  <Tag className="w-3 h-3" /> {tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       <p className="text-slate-300 mt-2 text-sm print:text-gray-700 leading-relaxed">{activity.description}</p>
                       
                       {/* Detailed Cost Breakdown */}
