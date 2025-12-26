@@ -1,0 +1,5 @@
+{
+  "name": "AI 智能旅程規劃師 (TravelGenius)",
+  "description": "基於 Google Gemini 2.5 的智能旅行規劃應用。自動搜尋景點、規劃路線、計算預算，並提供 PDF 行程下載。",
+  "requestFramePermissions": []
+}
