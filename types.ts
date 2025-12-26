@@ -42,10 +42,19 @@ export interface CandidatePlace {
   latitude: number;
   longitude: number;
   description: string;
+  
+  // New: Time Constraint Dictionary Data
+  // 0=Sun, 1=Mon, ..., 6=Sat
+  closedDays?: number[]; 
+  openingText?: string; // e.g. "10:00 - 22:00"
+
   // Calculated fields
   score?: number;
   distanceFromHotel?: number; // km
   matchReason?: string;
+  
+  // Algorithm output
+  suggestedDay?: number; // Which day of the trip (1-based) the algo assigned this to
 }
 
 export interface Activity {

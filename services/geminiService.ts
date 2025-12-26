@@ -1,6 +1,7 @@
+
 import { GoogleGenAI } from "@google/genai";
 import { UserPreferences, ItineraryResult, CandidatePlace } from "../types";
-import { rankCandidates } from "./rankingEngine";
+import { rankCandidates, optimizeRoute } from "./rankingEngine";
 
 // Helper to clean JSON string
 const cleanJsonString = (str: string) => {
@@ -24,6 +25,11 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
 
   const ai = new GoogleGenAI({ apiKey });
 
+  // Calculate duration
+  const start = new Date(prefs.dates.start);
+  const end = new Date(prefs.dates.end);
+  const totalDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 3600 * 24)) + 1;
+
   // ==========================================
   // STAGE 1: Candidate Search (Use Flash)
   // ==========================================
@@ -32,8 +38,10 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   const step1Prompt = `
     任務：針對以下需求搜尋 20 個推薦地點。
     資訊：${prefs.airport}, 住宿 ${prefs.hotels[0].name}, 風格 ${prefs.style.focus}。
-    客製化要求：${prefs.customRequests || '無'} (若包含遠處城市一日遊，務必搜尋該地景點)。
+    客製化要求：${prefs.customRequests || '無'}。
     
+    【重要】請務必搜尋該地點的「公休日」與「營業時間」。
+
     請務必回傳標準 JSON 格式，不要包含任何其他文字或解釋。格式如下：
     {
       "hotelCoords": { "lat": number, "lng": number },
@@ -46,7 +54,9 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
           "priceLevel": 數字 (1-4),
           "latitude": 數字,
           "longitude": 數字,
-          "description": "簡短描述"
+          "description": "簡短描述",
+          "closedDays": [數字], // 0=週日, 1=週一, ... 6=週六。若無休則為 []
+          "openingText": "例如: 10:00-22:00"
         }
       ]
     }
@@ -56,8 +66,6 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   let hotelCoords = { lat: 0, lng: 0 };
 
   try {
-      // FIX: Removed responseMimeType: "application/json" and responseSchema
-      // because using tools with strict JSON mode is currently unsupported/unstable on some models.
       const resp1 = await ai.models.generateContent({
           model: "gemini-flash-latest", 
           contents: step1Prompt,
@@ -75,17 +83,29 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
 
   } catch (e) {
       console.error("Stage 1 Failed:", e);
-      // More descriptive error for debugging
       const msg = e instanceof Error ? e.message : JSON.stringify(e);
       throw new Error(`搜尋景點失敗 (${msg})`);
   }
 
   // ==========================================
-  // STAGE 2: Ranking (Deterministic, No Cost)
+  // STAGE 2: Ranking & Time-Aware Optimization
   // ==========================================
   
+  // 1. Scoring (篩選高品質景點)
   const rankedCandidates = rankCandidates(candidates, prefs, hotelCoords.lat !== 0 ? hotelCoords : undefined);
+  
+  // 取前 16 個最高分景點
   const topCandidates = rankedCandidates.slice(0, 16); 
+  
+  // 2. Graph + Dictionary Algorithm (路徑 + 時間優化)
+  // 使用 Day-Aware Nearest Neighbor 算法重新排序並分組
+  console.log("Applying Time-Aware Graph optimization...");
+  const optimizedCandidates = optimizeRoute(
+      topCandidates, 
+      hotelCoords.lat !== 0 ? hotelCoords : {lat:0, lng:0},
+      prefs.dates.start,
+      totalDays
+  );
   
   // ==========================================
   // STAGE 3: Final Planning (Use 3 Pro)
@@ -93,9 +113,11 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   console.log("Stage 3: Planning Itinerary (Using Gemini 3 Pro)...");
 
   // Token Slimming
-  const minimizedCandidates = topCandidates.map(c => ({
+  const minimizedCandidates = optimizedCandidates.map(c => ({
       name: c.name,
-      cat: c.category,
+      day: c.suggestedDay, // Tell AI which day the algorithm assigned
+      closed: c.closedDays, // Tell AI the closed days
+      hours: c.openingText,
       lat: Number(c.latitude.toFixed(4)),
       lng: Number(c.longitude.toFixed(4)),
       score: c.score,
@@ -108,15 +130,23 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     你是一個專業的旅遊規劃師。請根據以下資訊規劃行程。
     
     【參數】
-    日期: ${prefs.dates.start} ~ ${prefs.dates.end}
+    日期: ${prefs.dates.start} ~ ${prefs.dates.end} (${totalDays}天)
     時間: ${prefs.dates.startTime} ~ ${prefs.dates.endTime}
     人數: ${prefs.travelers}
     預算: ${prefs.budget.amount} ${prefs.budget.currency}
     交通: ${prefs.style.transportPreference}
-    客製化: "${prefs.customRequests || '無'}" (最高優先級，如有一日遊需求請優先安排並計算交通)
+    客製化: "${prefs.customRequests || '無'}" (最高優先級)
 
-    【候選名單 (已排序)】
+    【候選名單 (已完成演算法優化)】
+    以下名單已經經過「地理路徑(Graph)」與「營業時間(Dictionary)」的演算法驗證。
+    **"day" 欄位代表演算法建議將該景點安排在第幾天，以避開公休並保持順路。**
     ${JSON.stringify(minimizedCandidates)}
+
+    【核心指令】
+    1. **請嚴格遵守 "day" 欄位的建議**。例如 day:1 的景點請全部安排在 Day 1，不要隨意移動到 Day 2，除非為了午餐/晚餐的邏輯順序微調。
+    2. 同一天的景點順序，請依照列表中的出現順序安排（因為已是最近鄰排序）。
+    3. 必須分配預算 (transportCost, cost)。
+    4. 回傳完整行程 JSON。
 
     【輸出要求】
     請直接回傳標準 JSON 格式，不要包含 Markdown 標記 (\`\`\`json) 或其他文字。
@@ -155,8 +185,6 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   `;
 
   try {
-    // FIX: Removed responseMimeType: "application/json" and responseSchema here as well
-    // to avoid potential conflicts with tools.
     const resp3 = await ai.models.generateContent({
       model: "gemini-3-pro-preview", 
       contents: step3Prompt,
