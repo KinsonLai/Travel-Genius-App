@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { UserPreferences, Hotel } from '../types';
 import { CURRENCIES, TRAVEL_STYLES, FOCUS_AREAS, TRANSPORT_PREFS } from '../constants';
 import { Plus, Trash2, MapPin, Calendar, Plane, Wallet, Settings, X, Users, MessageSquare } from 'lucide-react';
@@ -9,21 +9,51 @@ interface TripFormProps {
   isLoading: boolean;
 }
 
+const STORAGE_KEY = 'travel_genius_form_v1';
+
 const TripForm: React.FC<TripFormProps> = ({ onSubmit, isLoading }) => {
-  const [dates, setDates] = useState({ start: '', end: '', startTime: '09:00', endTime: '18:00' });
-  const [airport, setAirport] = useState('');
-  const [travelers, setTravelers] = useState(2); // Default 2 people
-  const [budget, setBudget] = useState({ amount: 15000, currency: 'HKD' });
-  const [style, setStyle] = useState<UserPreferences['style']>({
+  // Initialize state with lazy loading from localStorage
+  const loadState = <T,>(key: string, defaultVal: T): T => {
+      try {
+          const saved = localStorage.getItem(STORAGE_KEY);
+          if (saved) {
+              const parsed = JSON.parse(saved);
+              return parsed[key] !== undefined ? parsed[key] : defaultVal;
+          }
+      } catch (e) {
+          console.warn('Failed to load form data', e);
+      }
+      return defaultVal;
+  };
+
+  const [dates, setDates] = useState(loadState('dates', { start: '', end: '', startTime: '09:00', endTime: '18:00' }));
+  const [airport, setAirport] = useState(loadState('airport', ''));
+  const [travelers, setTravelers] = useState(loadState('travelers', 2));
+  const [budget, setBudget] = useState(loadState('budget', { amount: 15000, currency: 'HKD' }));
+  const [style, setStyle] = useState<UserPreferences['style']>(loadState('style', {
     pace: 'moderate',
     focus: 'balanced',
     transportPreference: 'balanced',
-  });
-  const [customRequests, setCustomRequests] = useState('');
+  }));
+  const [customRequests, setCustomRequests] = useState(loadState('customRequests', ''));
   
-  const [hotels, setHotels] = useState<Hotel[]>([
+  const [hotels, setHotels] = useState<Hotel[]>(loadState('hotels', [
     { id: '1', name: '', location: '', checkIn: '', checkOut: '' }
-  ]);
+  ]));
+
+  // Save to localStorage whenever meaningful state changes
+  useEffect(() => {
+      const dataToSave = {
+          dates,
+          airport,
+          travelers,
+          budget,
+          style,
+          customRequests,
+          hotels
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(dataToSave));
+  }, [dates, airport, travelers, budget, style, customRequests, hotels]);
 
   // State to manage which hotel's date picker is open
   const [activeHotelDateId, setActiveHotelDateId] = useState<string | null>(null);
