@@ -22,8 +22,14 @@ const App: React.FC = () => {
     if (sharedId) {
       setIsLoading(true);
       setLoadingMessage("正在載入分享的行程...");
-      getItineraryFromCloud(sharedId)
-        .then(data => {
+      
+      // Create a promise that rejects after 10 seconds to prevent infinite loading
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("載入逾時，請檢查網路連線")), 10000);
+      });
+
+      Promise.race([getItineraryFromCloud(sharedId), timeoutPromise])
+        .then((data: any) => {
           if (data) {
             setItinerary(data);
             setStep('result');
@@ -31,9 +37,9 @@ const App: React.FC = () => {
             setError("找不到該行程或連結已過期。");
           }
         })
-        .catch(err => {
+        .catch((err: any) => {
           console.error(err);
-          setError("讀取行程時發生錯誤。");
+          setError("讀取行程失敗：" + (err.message || "發生未知錯誤"));
         })
         .finally(() => {
           setIsLoading(false);

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { ItineraryResult } from '../types';
-import { DollarSign, Navigation, ExternalLink, Printer, Map as MapIcon, List, Users, Share2, Save, MapPin, Check } from 'lucide-react';
+import { DollarSign, Navigation, ExternalLink, Printer, Map as MapIcon, List, Users, Share2, MapPin, Check, Download, Info } from 'lucide-react';
 import { triggerBrowserPrint } from '../utils/pdfGenerator';
+import { downloadKML } from '../utils/kmlGenerator';
 import { saveItineraryToCloud } from '../services/storageService';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import MapComponent from './MapComponent';
@@ -17,6 +18,7 @@ const ItineraryView: React.FC<ItineraryViewProps> = ({ itinerary, travelers, onB
   const [isSaving, setIsSaving] = useState(false);
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [showKmlHelp, setShowKmlHelp] = useState(false);
 
   // Prepare chart data & calculations
   const costData = itinerary.days.map(day => ({
@@ -46,6 +48,11 @@ const ItineraryView: React.FC<ItineraryViewProps> = ({ itinerary, travelers, onB
           setCopySuccess(true);
           setTimeout(() => setCopySuccess(false), 2000);
       }
+  };
+
+  const handleKmlExport = () => {
+      downloadKML(itinerary);
+      setShowKmlHelp(true);
   };
 
   // Generate Google Maps Directions URL for the whole day
@@ -106,13 +113,19 @@ const ItineraryView: React.FC<ItineraryViewProps> = ({ itinerary, travelers, onB
           </div>
 
           {/* Action Buttons - Mobile Optimized */}
-          <div className="grid grid-cols-2 md:flex gap-2 print:hidden">
+          <div className="grid grid-cols-2 sm:flex gap-2 print:hidden">
               <button onClick={handleShare} disabled={isSaving || !!shareUrl} className="flex items-center justify-center gap-2 bg-indigo-600 text-white px-4 py-3 md:py-2 rounded-lg hover:bg-indigo-500 transition text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed">
                 {isSaving ? <span className="animate-spin">⌛</span> : <Share2 className="w-4 h-4" />}
-                {shareUrl ? '已建立連結' : '分享行程'}
+                {shareUrl ? '已建立' : '分享'}
               </button>
               
-              <button onClick={triggerBrowserPrint} className="flex items-center justify-center gap-2 bg-slate-700 text-white px-4 py-3 md:py-2 rounded-lg hover:bg-slate-600 transition text-sm font-medium">
+              <button onClick={handleKmlExport} className="flex items-center justify-center gap-2 bg-emerald-600 text-white px-4 py-3 md:py-2 rounded-lg hover:bg-emerald-500 transition text-sm font-medium">
+                <Download className="w-4 h-4" /> 
+                <span className="hidden md:inline">匯出地圖 (KML)</span>
+                <span className="md:hidden">KML</span>
+              </button>
+
+              <button onClick={triggerBrowserPrint} className="flex items-center justify-center gap-2 bg-slate-700 text-white px-4 py-3 md:py-2 rounded-lg hover:bg-slate-600 transition text-sm font-medium col-span-2 sm:col-span-1">
                 <Printer className="w-4 h-4" /> 
                 <span className="hidden md:inline">列印/PDF</span>
                 <span className="md:hidden">PDF</span>
@@ -120,6 +133,23 @@ const ItineraryView: React.FC<ItineraryViewProps> = ({ itinerary, travelers, onB
           </div>
         </div>
       </div>
+
+      {/* Helper message for KML Export */}
+      {showKmlHelp && (
+          <div className="bg-emerald-900/30 border border-emerald-500/50 p-4 rounded-xl flex items-start gap-4 animate-fade-in print:hidden">
+            <Info className="w-6 h-6 text-emerald-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <h3 className="text-emerald-300 font-bold mb-1">如何使用地圖分組功能？</h3>
+              <p className="text-sm text-emerald-100/80 mb-2">
+                已下載 KML 檔案。請前往 <a href="https://www.google.com/mymaps" target="_blank" className="underline text-white font-bold">Google My Maps (我的地圖)</a>，建立新地圖並點擊「匯入」，選擇此檔案即可。
+              </p>
+              <p className="text-xs text-emerald-200/60">
+                Google 會自動將每一天的行程分為不同的圖層 (Layer)，方便您進行分組檢視。
+              </p>
+              <button onClick={() => setShowKmlHelp(false)} className="mt-2 text-xs bg-emerald-800 hover:bg-emerald-700 px-3 py-1 rounded text-white">知道了</button>
+            </div>
+          </div>
+      )}
 
       {/* Share URL Result Section */}
       {shareUrl && (
