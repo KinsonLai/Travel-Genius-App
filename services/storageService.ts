@@ -2,32 +2,40 @@ import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, getDoc } from "firebase/firestore";
 import { ItineraryResult } from "../types";
 
+// Helper to safely get env vars without crashing in browser (where process is undefined)
+const getEnv = (viteKey: string, processKey: string) => {
+  // 1. Try Vite env (import.meta.env)
+  if (import.meta.env && import.meta.env[viteKey]) {
+    return import.meta.env[viteKey];
+  }
+  // 2. Try Process env (Safe check)
+  if (typeof process !== 'undefined' && process.env && process.env[processKey]) {
+    return process.env[processKey];
+  }
+  return "";
+};
+
 // ==========================================
 // CONFIGURATION STEP:
 // Netlify 部署時，請在 Netlify 後台 Environment Variables 設定這些變數
 // 變數名稱必須以 VITE_ 開頭
 // ==========================================
 const firebaseConfig = {
-  // 優先使用環境變數 (Deployment Mode)
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || process.env.FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || process.env.FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || process.env.FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || process.env.FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || process.env.FIREBASE_APP_ID,
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || process.env.FIREBASE_MEASUREMENT_ID,
-  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || process.env.FIREBASE_DATABASE_URL
-  
-  // 如果您在本地開發且沒有設定 .env，可以將字串直接寫死在下方 (但不建議上傳到 GitHub)
-  // apiKey: "Your-String-Here", ...
+  apiKey: getEnv("VITE_FIREBASE_API_KEY", "FIREBASE_API_KEY"),
+  authDomain: getEnv("VITE_FIREBASE_AUTH_DOMAIN", "FIREBASE_AUTH_DOMAIN"),
+  projectId: getEnv("VITE_FIREBASE_PROJECT_ID", "FIREBASE_PROJECT_ID"),
+  storageBucket: getEnv("VITE_FIREBASE_STORAGE_BUCKET", "FIREBASE_STORAGE_BUCKET"),
+  messagingSenderId: getEnv("VITE_FIREBASE_MESSAGING_SENDER_ID", "FIREBASE_MESSAGING_SENDER_ID"),
+  appId: getEnv("VITE_FIREBASE_APP_ID", "FIREBASE_APP_ID"),
+  measurementId: getEnv("VITE_FIREBASE_MEASUREMENT_ID", "FIREBASE_MEASUREMENT_ID"),
+  databaseURL: getEnv("VITE_FIREBASE_DATABASE_URL", "FIREBASE_DATABASE_URL")
 };
 
 let db: any = null;
 
 // Initialize Firebase
 try {
-  // Check if config has values (either from env or hardcoded)
-  // We use projectId as a sanity check
+  // Check if config has values
   if (firebaseConfig.projectId) {
     const app = initializeApp(firebaseConfig);
     db = getFirestore(app);
@@ -56,7 +64,7 @@ export const saveItineraryToCloud = async (itinerary: ItineraryResult): Promise<
       return id;
     } catch (e) {
       console.error("Error adding document to Firebase: ", e);
-      alert("儲存至雲端失敗，可能是 Firebase 設定錯誤或權限問題 (請檢查 Firestore 是否開啟 Test Mode)。將使用本地儲存代替。");
+      alert("儲存至雲端失敗，可能是 Firebase 設定錯誤或權限問題。將使用本地儲存代替。");
       // Fallback to local storage
       localStorage.setItem(`itinerary_${id}`, JSON.stringify(itinerary));
       return id;

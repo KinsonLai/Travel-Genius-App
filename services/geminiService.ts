@@ -15,8 +15,13 @@ const cleanJsonString = (str: string) => {
 };
 
 export const generateItinerary = async (prefs: UserPreferences): Promise<ItineraryResult> => {
-  // NOTE: For Vite/Netlify deployment, we use import.meta.env and VITE_ prefix
-  const apiKey = import.meta.env.VITE_API_KEY || process.env.API_KEY;
+  // Safe env check
+  let apiKey = "";
+  if (import.meta.env && import.meta.env.VITE_API_KEY) {
+    apiKey = import.meta.env.VITE_API_KEY;
+  } else if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+    apiKey = process.env.API_KEY;
+  }
   
   if (!apiKey) {
     console.error("API Key is missing. Please check your .env file or Netlify Environment Variables.");
@@ -134,7 +139,6 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
       }
 
       // CRITICAL FIX: Inject the traveler count from preferences into the result
-      // This ensures that when the itinerary is saved/shared, we know how many people it was for.
       data.travelers = prefs.travelers;
 
       return data;
