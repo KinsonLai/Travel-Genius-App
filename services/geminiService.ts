@@ -1,15 +1,20 @@
-import { GoogleGenAI, Type, Schema } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import { UserPreferences, ItineraryResult, CandidatePlace } from "../types";
 import { rankCandidates } from "./rankingEngine";
 
-// Helper to clean JSON string (still useful as a safety net)
+// Helper to clean JSON string
 const cleanJsonString = (str: string) => {
+  // Remove markdown code blocks if present
   let cleaned = str.replace(/```json\n?/g, '').replace(/```/g, '');
+  
+  // Find the first '{' and last '}'
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
+  
   if (firstBrace !== -1 && lastBrace !== -1) {
     cleaned = cleaned.substring(firstBrace, lastBrace + 1);
   }
+  
   return cleaned;
 };
 
@@ -29,55 +34,40 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     資訊：${prefs.airport}, 住宿 ${prefs.hotels[0].name}, 風格 ${prefs.style.focus}。
     客製化要求：${prefs.customRequests || '無'} (若包含遠處城市一日遊，務必搜尋該地景點)。
     
-    請回傳 JSON 資料，包含住宿座標與候選景點清單。
-  `;
-
-  // Define Schema to save tokens on format instructions and ensure validity
-  const stage1Schema: Schema = {
-    type: Type.OBJECT,
-    properties: {
-      hotelCoords: {
-        type: Type.OBJECT,
-        properties: {
-          lat: { type: Type.NUMBER },
-          lng: { type: Type.NUMBER },
+    請務必回傳標準 JSON 格式，不要包含任何其他文字或解釋。格式如下：
+    {
+      "hotelCoords": { "lat": number, "lng": number },
+      "candidates": [
+        {
+          "name": "地點名稱",
+          "category": "類別 (sightseeing/food/shopping/culture/other)",
+          "rating": 數字 (1-5),
+          "reviewCount": 數字,
+          "priceLevel": 數字 (1-4),
+          "latitude": 數字,
+          "longitude": 數字,
+          "description": "簡短描述"
         }
-      },
-      candidates: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            name: { type: Type.STRING },
-            category: { type: Type.STRING }, // sightseeing, food, shopping, culture, other
-            rating: { type: Type.NUMBER },
-            reviewCount: { type: Type.NUMBER },
-            priceLevel: { type: Type.NUMBER },
-            latitude: { type: Type.NUMBER },
-            longitude: { type: Type.NUMBER },
-            description: { type: Type.STRING }
-          }
-        }
-      }
+      ]
     }
-  };
+  `;
 
   let candidates: CandidatePlace[] = [];
   let hotelCoords = { lat: 0, lng: 0 };
 
   try {
-      // Use gemini-flash-latest for high-speed, low-cost search
+      // FIX: Removed responseMimeType: "application/json" and responseSchema
+      // because using tools with strict JSON mode is currently unsupported/unstable on some models.
       const resp1 = await ai.models.generateContent({
           model: "gemini-flash-latest", 
           contents: step1Prompt,
           config: { 
-              responseMimeType: "application/json",
-              responseSchema: stage1Schema,
               tools: [{ googleSearch: {} }] 
           }
       });
       
-      const rawData = JSON.parse(cleanJsonString(resp1.text || "{}"));
+      const rawText = resp1.text || "{}";
+      const rawData = JSON.parse(cleanJsonString(rawText));
       candidates = rawData.candidates || [];
       hotelCoords = rawData.hotelCoords || { lat: 0, lng: 0 };
       
@@ -85,7 +75,9 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
 
   } catch (e) {
       console.error("Stage 1 Failed:", e);
-      throw new Error(`搜尋景點失敗 (${e instanceof Error ? e.message : 'Unknown Error'})`);
+      // More descriptive error for debugging
+      const msg = e instanceof Error ? e.message : JSON.stringify(e);
+      throw new Error(`搜尋景點失敗 (${msg})`);
   }
 
   // ==========================================
@@ -93,14 +85,14 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   // ==========================================
   
   const rankedCandidates = rankCandidates(candidates, prefs, hotelCoords.lat !== 0 ? hotelCoords : undefined);
-  const topCandidates = rankedCandidates.slice(0, 16); // Take slightly more for buffer
+  const topCandidates = rankedCandidates.slice(0, 16); 
   
   // ==========================================
   // STAGE 3: Final Planning (Use 3 Pro)
   // ==========================================
   console.log("Stage 3: Planning Itinerary (Using Gemini 3 Pro)...");
 
-  // Token Slimming: Round coordinates and use shorter keys or just essential data
+  // Token Slimming
   const minimizedCandidates = topCandidates.map(c => ({
       name: c.name,
       cat: c.category,
@@ -112,51 +104,8 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
       reason: c.matchReason
   }));
 
-  const stage3Schema: Schema = {
-    type: Type.OBJECT,
-    properties: {
-      tripTitle: { type: Type.STRING },
-      totalCostEstimate: { type: Type.NUMBER },
-      currency: { type: Type.STRING },
-      summary: { type: Type.STRING },
-      days: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            date: { type: Type.STRING },
-            dayNumber: { type: Type.NUMBER },
-            summary: { type: Type.STRING },
-            activities: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  time: { type: Type.STRING },
-                  placeName: { type: Type.STRING },
-                  description: { type: Type.STRING },
-                  reasoning: { type: Type.STRING },
-                  matchTags: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  cost: { type: Type.NUMBER },
-                  transportMethod: { type: Type.STRING },
-                  transportCost: { type: Type.NUMBER },
-                  transportTimeMinutes: { type: Type.NUMBER },
-                  googleMapsUri: { type: Type.STRING },
-                  rating: { type: Type.STRING },
-                  isMeal: { type: Type.BOOLEAN },
-                  latitude: { type: Type.NUMBER },
-                  longitude: { type: Type.NUMBER }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  };
-
   const step3Prompt = `
-    規劃行程表。
+    你是一個專業的旅遊規劃師。請根據以下資訊規劃行程。
     
     【參數】
     日期: ${prefs.dates.start} ~ ${prefs.dates.end}
@@ -169,22 +118,49 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     【候選名單 (已排序)】
     ${JSON.stringify(minimizedCandidates)}
 
-    【要求】
-    1. 順路優先，考慮景點營業時間。
-    2. 必須分配預算 (transportCost, cost)。
-    3. 嚴格遵守客製化需求。
-    4. 回傳完整行程 JSON。
+    【輸出要求】
+    請直接回傳標準 JSON 格式，不要包含 Markdown 標記 (\`\`\`json) 或其他文字。
+    JSON 結構必須符合以下 Schema：
+    {
+      "tripTitle": "旅程標題",
+      "totalCostEstimate": 數字,
+      "currency": "${prefs.budget.currency}",
+      "summary": "行程總結",
+      "days": [
+        {
+          "date": "YYYY-MM-DD",
+          "dayNumber": 數字,
+          "summary": "當天主題",
+          "activities": [
+            {
+              "time": "HH:MM",
+              "placeName": "名稱",
+              "description": "描述",
+              "reasoning": "推薦理由",
+              "matchTags": ["標籤1", "標籤2"],
+              "cost": 數字 (單人費用),
+              "transportMethod": "交通方式 (如: 地鐵, 計程車, 步行)",
+              "transportCost": 數字 (單人交通費),
+              "transportTimeMinutes": 數字 (交通時間),
+              "googleMapsUri": "URL",
+              "rating": "評分",
+              "isMeal": 布林值,
+              "latitude": 數字,
+              "longitude": 數字
+            }
+          ]
+        }
+      ]
+    }
   `;
 
   try {
-    // Strategy: Use 'gemini-3-pro-preview' for maximum reasoning capability.
-    // 3-Pro is smart enough without 'thinkingConfig', so we remove it to avoid extra token costs.
+    // FIX: Removed responseMimeType: "application/json" and responseSchema here as well
+    // to avoid potential conflicts with tools.
     const resp3 = await ai.models.generateContent({
       model: "gemini-3-pro-preview", 
       contents: step3Prompt,
       config: {
-        responseMimeType: "application/json",
-        responseSchema: stage3Schema,
         tools: [{ googleSearch: {} }, { googleMaps: {} }],
       },
     });
