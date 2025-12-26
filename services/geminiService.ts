@@ -1,3 +1,4 @@
+
 import { GoogleGenAI } from "@google/genai";
 import { UserPreferences, ItineraryResult, CandidatePlace } from "../types";
 import { rankCandidates } from "./rankingEngine";
@@ -31,9 +32,9 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   const ai = new GoogleGenAI({ apiKey });
 
   // ==========================================
-  // STAGE 1: Candidate Search (Raw Data)
+  // STAGE 1: Candidate Search (Cost Optimization: Use Flash)
   // ==========================================
-  console.log("Stage 1: Fetching raw candidates...");
+  console.log("Stage 1: Fetching raw candidates (Using Flash)...");
   
   const step1Prompt = `
     你是一個資料採集助手。請針對以下旅遊需求，搜尋並列出 20 個推薦的候選地點（景點、餐廳、購物點）。
@@ -61,15 +62,17 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
        - "priceLevel": 價格等級 (Number, 1=便宜, 2=適中, 3=昂貴, 4=奢華)
        - "latitude": 緯度 (Number)
        - "longitude": 經度 (Number)
-       - "description": 簡短描述 (String)
+       - "description": 簡短描述 (String, 30字以內)
   `;
 
   let candidates: CandidatePlace[] = [];
   let hotelCoords = { lat: 0, lng: 0 };
 
   try {
+      // 策略調整：使用 gemini-2.5-flash 進行搜尋
+      // Flash 擅長快速檢索且便宜，適合 Stage 1
       const resp1 = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
+          model: "gemini-2.5-flash", 
           contents: step1Prompt,
           config: { 
               responseMimeType: "application/json",
@@ -81,7 +84,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
       candidates = rawData.candidates || [];
       hotelCoords = rawData.hotelCoords || { lat: 0, lng: 0 };
       
-      console.log(`Stage 1 Complete. Found ${candidates.length} candidates. Hotel at:`, hotelCoords);
+      console.log(`Stage 1 Complete. Found ${candidates.length} candidates.`);
 
   } catch (e) {
       console.error("Stage 1 Failed:", e);
@@ -89,22 +92,36 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   }
 
   // ==========================================
-  // STAGE 2: Hardcoded Ranking Engine
+  // STAGE 2: Hardcoded Ranking Engine (No Cost)
   // ==========================================
   console.log("Stage 2: Running Ranking Engine...");
   
   // Apply the mathematical formula
   const rankedCandidates = rankCandidates(candidates, prefs, hotelCoords.lat !== 0 ? hotelCoords : undefined);
   
-  // Take top 12-15 items for the trip
+  // Take top 15 items for the trip
   const topCandidates = rankedCandidates.slice(0, 15);
   
-  console.log("Top Candidates Selected:", topCandidates.map(c => `${c.name}: ${c.score}`));
+  // ==========================================
+  // STAGE 3: Final Planning (Performance: Use Pro)
+  // ==========================================
+  console.log("Stage 3: Generating Final Itinerary (Using Pro)...");
 
-  // ==========================================
-  // STAGE 3: Final Planning (AI Assembly)
-  // ==========================================
-  console.log("Stage 3: Generating Final Itinerary...");
+  // TOKEN SAVING STRATEGY:
+  // Pro 模型很聰明，它不需要我們傳入冗長的 "description" 就能知道 "東京鐵塔" 是什麼。
+  // 我們在這裡將 topCandidates 進行「瘦身」，移除描述欄位，只保留決策需要的數據。
+  // 這可以顯著減少 Input Token 的消耗。
+  const minimizedCandidates = topCandidates.map(c => ({
+      name: c.name,
+      cat: c.category,
+      lat: c.latitude,
+      lng: c.longitude,
+      score: c.score,
+      rating: c.rating,
+      price: c.priceLevel,
+      matchReason: c.matchReason // 保留排名理由，讓 AI 知道為什麼選這個
+      // description 被移除
+  }));
 
   const schemaDescription = JSON.stringify({
     tripTitle: "旅程標題",
@@ -120,8 +137,8 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
           {
             time: "HH:MM",
             placeName: "地點名稱",
-            description: "描述",
-            reasoning: "顯示 Ranking 引擎計算的結果 (例如: '綜合評分 85.0，因高評價且順路入選')",
+            description: "描述 (請重新生成生動的描述)",
+            reasoning: "顯示 Ranking 引擎計算的結果",
             matchTags: ["Tag1", "Tag2"],
             cost: "費用 (Number)",
             currency: "貨幣",
@@ -150,8 +167,8 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     - 交通偏好: ${prefs.style.transportPreference}
     - *** 客製化要求 (Strict) ***: "${prefs.customRequests || '無'}"
 
-    【已排序且計算過分數的候選名單 (高分優先)】
-    ${JSON.stringify(topCandidates, null, 2)}
+    【已排序且計算過分數的候選名單 (高分優先，已精簡資料)】
+    ${JSON.stringify(minimizedCandidates, null, 2)}
 
     【規劃要求】
     1. **嚴格執行客製化要求**: 如果用戶要求去特定城市一日遊 (即使不在候選名單前幾名，或距離較遠)，請務必優先安排一天滿足該需求，並在該日的 summary 說明。
@@ -167,12 +184,14 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   `;
 
   try {
+    // 策略維持：使用 gemini-3-pro-preview 進行複雜的路線與邏輯規劃
+    // 因為我們已經縮減了 Input 資料，這裡的 Token 費用會降低，但仍保有 Pro 的邏輯能力
     const resp3 = await ai.models.generateContent({
-      model: "gemini-2.5-flash", 
+      model: "gemini-3-pro-preview", 
       contents: step3Prompt,
       config: {
         responseMimeType: "application/json",
-        // Still allow tools in step 3 to fetch accurate open hours or transport info
+        // Still allow tools in step 3 to fetch accurate open hours or transport info if needed
         tools: [{ googleSearch: {} }, { googleMaps: {} }],
       },
     });
