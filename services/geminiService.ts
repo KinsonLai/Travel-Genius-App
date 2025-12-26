@@ -189,7 +189,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
       model: "gemini-3-pro-preview", 
       contents: step3Prompt,
       config: {
-        tools: [{ googleSearch: {} }, { googleMaps: {} }],
+        tools: [{ googleSearch: {} }],
       },
     });
 
