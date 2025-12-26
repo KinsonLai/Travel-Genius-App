@@ -48,19 +48,19 @@ AI TravelGenius 是一個基於 **Google Gemini API** 的現代化 Web 應用程
 
 ```mermaid
 graph TD
-    A[User Input] -->|Preferences| B(Controller)
-    B -->|Prompt| C{Gemini Flash + Search Tool}
-    C -->|Raw Candidates| D[Ranking Engine]
+    A["User Input"] -->|Preferences| B("Controller")
+    B -->|Prompt| C{"Gemini Flash + Search Tool"}
+    C -->|Raw Candidates| D["Ranking Engine"]
     
     subgraph "Deterministic Layer (演算法層)"
-    D -->|1. Scoring| E[加權評分 (Interest/Price/Rating)]
-    E -->|2. Filtering| F[Time Window Check (公休過濾)]
-    F -->|3. Optimization| G[Graph Nearest Neighbor (路徑排序)]
+    D -->|"1. Scoring"| E["加權評分 (Interest/Price/Rating)"]
+    E -->|"2. Filtering"| F["Time Window Check (公休過濾)"]
+    F -->|"3. Optimization"| G["Graph Nearest Neighbor (路徑排序)"]
     end
     
-    G -->|Optimized List| H{Gemini 3 Pro}
-    H -->|Final Reasoning| I[Structured JSON Itinerary]
-    I --> J[React UI / Map / Charts]
+    G -->|"Optimized List"| H{"Gemini 3 Pro"}
+    H -->|"Final Reasoning"| I["Structured JSON Itinerary"]
+    I --> J["React UI / Map / Charts"]
 ```
 
 ---
