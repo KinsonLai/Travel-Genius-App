@@ -5,21 +5,16 @@ import { rankCandidates, optimizeRoute } from "./rankingEngine";
 
 // Helper to clean JSON string
 const cleanJsonString = (str: string) => {
-  // Remove markdown code blocks if present
   let cleaned = str.replace(/```json\n?/g, '').replace(/```/g, '');
-  
-  // Find the first '{' and last '}'
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
-  
   if (firstBrace !== -1 && lastBrace !== -1) {
     cleaned = cleaned.substring(firstBrace, lastBrace + 1);
   }
-  
   return cleaned;
 };
 
-// Helper: Deduplicate candidates by name
+// Helper: Deduplicate candidates
 const deduplicateCandidates = (candidates: CandidatePlace[]): CandidatePlace[] => {
     const seen = new Set();
     return candidates.filter(c => {
@@ -36,51 +31,66 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
 
   const ai = new GoogleGenAI({ apiKey });
 
-  // Calculate duration
   const start = new Date(prefs.dates.start);
   const end = new Date(prefs.dates.end);
   const totalDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 3600 * 24)) + 1;
 
   // ==========================================
-  // STAGE 1: Parallel Candidate Search (Per Hotel)
+  // STAGE 0: Pre-computation (Airport & Custom Keywords)
   // ==========================================
-  console.log("Stage 1: Fetching raw candidates (Parallel Search per Hotel)...");
+  console.log("Stage 0: Pre-fetching Airport & Analyzing Custom Requests...");
   
-  // Create a unique search task for each hotel to guarantee coverage
-  // (Optimization: If hotels are extremely close/same city, we could group them, but parallel is safer for correctness)
-  const searchPromises = prefs.hotels.map(async (hotel, index) => {
+  // 1. Get Airport Coordinates logic (Simple search query)
+  let airportCoords = { lat: 0, lng: 0 };
+  const airportPrompt = `
+    Return JSON only: {"lat": number, "lng": number} for the airport: "${prefs.airport}".
+  `;
+  try {
+     const airportResp = await ai.models.generateContent({
+         model: "gemini-flash-latest",
+         contents: airportPrompt,
+         config: { tools: [{ googleSearch: {} }] }
+     });
+     const airportJson = JSON.parse(cleanJsonString(airportResp.text || "{}"));
+     if(airportJson.lat) airportCoords = airportJson;
+  } catch(e) {
+      console.warn("Failed to geocode airport, defaulting to 0,0");
+  }
+
+  // 2. Extract Specific Locations from Custom Request to force-search them
+  let customKeywords: string[] = [];
+  if (prefs.customRequests && prefs.customRequests.length > 5) {
+      const extractPrompt = `
+        User Request: "${prefs.customRequests}"
+        Extract specific place names or city names mentioned that are NOT generic (like 'sushi' or 'park').
+        Return JSON: {"places": ["Place A", "Place B"]}
+      `;
+      try {
+          const kwResp = await ai.models.generateContent({ model: "gemini-flash-latest", contents: extractPrompt });
+          const kwJson = JSON.parse(cleanJsonString(kwResp.text || "{}"));
+          customKeywords = kwJson.places || [];
+      } catch(e) {}
+  }
+
+  // ==========================================
+  // STAGE 1: Parallel Candidate Search
+  // ==========================================
+  console.log("Stage 1: Fetching candidates (Hotels + Custom Requests)...");
+
+  // Construct Search Tasks
+  const hotelTasks = prefs.hotels.map(async (hotel) => {
       const prompt = `
-        任務：針對以下「單一特定住宿點」搜尋 15 個推薦地點。
-        機場：${prefs.airport}
-        中心住宿點：${hotel.name} (位置: ${hotel.location})
-        旅遊風格：${prefs.style.focus}
-        客製化要求：${prefs.customRequests || '無'}。
+        任務：針對住宿點「${hotel.name}」(${hotel.location}) 搜尋 12 個適合的景點/餐廳。
+        ${customKeywords.length > 0 ? `優先搜尋符合這些關鍵字的地點: ${customKeywords.join(', ')} (若在附近)` : ''}
         
         【嚴格限制】
-        1. **只搜尋距離此住宿點 1.5 小時交通圈內的景點**。不要推薦其他城市的景點。
-        2. 務必搜尋此住宿點 (${hotel.name}) 的精確經緯度。
-        3. 包含景點的「公休日(0-6)」與「營業時間」。
-
-        回傳 JSON 格式：
-        {
-          "hotelCoords": { "lat": number, "lng": number },
-          "candidates": [
-            {
-              "name": "地點名稱",
-              "category": "類別 (sightseeing/food/shopping/culture/other)",
-              "rating": 數字 (1-5),
-              "reviewCount": 數字,
-              "priceLevel": 數字 (1-4),
-              "latitude": 數字,
-              "longitude": 數字,
-              "description": "簡短描述",
-              "closedDays": [數字], 
-              "openingText": "例如: 10:00-22:00"
-            }
-          ]
-        }
+        1. 距離住宿點 1.5小時內。
+        2. 回傳經緯度、公休日。
+        3. **務必盡量提供該地點的官方網站或介紹頁面 URL (website)**。
+        
+        JSON Format: { "hotelCoords": {"lat": number, "lng": number}, "candidates": [...] }
+        (Candidate fields: name, category, rating, priceLevel, latitude, longitude, closedDays, openingText, website)
       `;
-
       try {
           const resp = await ai.models.generateContent({
               model: "gemini-flash-latest", 
@@ -88,127 +98,133 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
               config: { tools: [{ googleSearch: {} }] }
           });
           const json = JSON.parse(cleanJsonString(resp.text || "{}"));
-          
-          // Update hotel coords if found
-          if (json.hotelCoords && json.hotelCoords.lat) {
-              hotel.latitude = json.hotelCoords.lat;
-              hotel.longitude = json.hotelCoords.lng;
-          }
-
+          // Update hotel coords
+          if (json.hotelCoords?.lat) { hotel.latitude = json.hotelCoords.lat; hotel.longitude = json.hotelCoords.lng; }
           return (json.candidates || []) as CandidatePlace[];
-      } catch (e) {
-          console.error(`Search failed for hotel ${hotel.name}`, e);
-          return [];
-      }
+      } catch (e) { return []; }
   });
 
-  // Wait for all searches to complete
-  const results = await Promise.all(searchPromises);
-  
-  // Flatten and Deduplicate
-  let allCandidates = deduplicateCandidates(results.flat());
-  
-  console.log(`Stage 1 Complete. Found total ${allCandidates.length} unique candidates across ${prefs.hotels.length} zones.`);
+  const customTask = async () => {
+      if (customKeywords.length === 0) return [];
+      const prompt = `
+         Search details for specific places: ${customKeywords.join(', ')}.
+         JSON Format: { "candidates": [...] }
+         Must include valid latitude/longitude and website URL.
+      `;
+      try {
+        const resp = await ai.models.generateContent({
+            model: "gemini-flash-latest", 
+            contents: prompt,
+            config: { tools: [{ googleSearch: {} }] }
+        });
+        const json = JSON.parse(cleanJsonString(resp.text || "{}"));
+        return (json.candidates || []) as CandidatePlace[];
+      } catch (e) { return []; }
+  };
 
-  if (allCandidates.length === 0) {
-      throw new Error("無法找到任何景點，請檢查輸入的城市或地點名稱是否正確。");
-  }
+  const results = await Promise.all([...hotelTasks, customTask()]);
+  const allCandidates = deduplicateCandidates(results.flat());
+
+  if (allCandidates.length === 0) throw new Error("無法找到任何景點，請檢查輸入。");
 
   // ==========================================
-  // STAGE 2: Ranking & Time-Aware Optimization
+  // STAGE 2: Ranking & Geo-Fenced Optimization
   // ==========================================
-  
-  // 1. Scoring 
   const rankedCandidates = rankCandidates(allCandidates, prefs, prefs.hotels);
-  
-  // 取前 N 個 (根據天數動態調整，每天約 5-6 個候選，總數不超過 40)
-  const maxCandidates = Math.min(totalDays * 6, 40);
+  const maxCandidates = Math.min(totalDays * 5, 35); 
   const topCandidates = rankedCandidates.slice(0, maxCandidates); 
   
-  // 2. Graph + Dictionary Algorithm (Geo-Fencing Logic applied here)
-  console.log("Applying Time-Aware Graph optimization...");
+  console.log(`Optimization: Processing ${topCandidates.length} spots. Airport: ${airportCoords.lat},${airportCoords.lng}`);
+
   const optimizedCandidates = optimizeRoute(
       topCandidates, 
       prefs.hotels, 
       prefs.dates.start,
-      totalDays
+      totalDays,
+      airportCoords.lat !== 0 ? airportCoords : undefined
   );
   
   // ==========================================
-  // STAGE 3: Final Planning (Use 3 Pro)
+  // STAGE 3: Final Planning
   // ==========================================
-  console.log("Stage 3: Planning Itinerary (Using Gemini 3 Pro)...");
+  console.log("Stage 3: Final Planning...");
 
-  // Token Slimming
+  // Minimal token payload
   const minimizedCandidates = optimizedCandidates.map(c => ({
       name: c.name,
-      day: c.suggestedDay, // Strictly assigned by algo
-      closed: c.closedDays,
+      day: c.suggestedDay, // THE ALGORITHM HAS SPOKEN. DO NOT CHANGE.
       hours: c.openingText,
       lat: Number(c.latitude.toFixed(4)),
       lng: Number(c.longitude.toFixed(4)),
-      tag: c.matchReason, // Contains info about which hotel it belongs to
-      dist: c.distanceFromHotel
+      dist: c.distanceFromHotel,
+      context: c.matchReason,
+      website: c.website // Pass the website from Stage 1 to Stage 3
   }));
   
-  const hotelSchedule = prefs.hotels.map(h => 
-      `日期區間 [${h.checkIn} ~ ${h.checkOut}] 住: ${h.name} (${h.latitude?.toFixed(3)}, ${h.longitude?.toFixed(3)})`
+  const hotelSchedule = prefs.hotels.map((h, i) => 
+      `Day ? (Check-in ${h.checkIn}): 住 ${h.name}`
   ).join('\n');
 
+  const budgetPerDay = Math.floor(prefs.budget.amount / totalDays);
+
   const step3Prompt = `
-    你是一個專業的旅遊規劃師。請生成一份詳細的行程表。
+    角色：嚴格的旅行會計師與導遊。
+    任務：將提供的候選列表轉換為詳細行程 JSON。
 
-    【核心限制 - 必須嚴格遵守】
-    1. **多住宿邏輯**: 用戶在不同日期住在不同酒店。
-       - 請參閱下方的 [住宿安排]。
-       - **絕對禁止**在住 A 酒店的日子，安排 B 酒店附近的景點 (除非是移動日)。
-       - 候選名單中的 "day" 欄位是由演算法根據地理位置分配的，**請務必 100% 遵守該 day 分配**。不要私自移動景點到別天。
-    
-    【住宿安排】
+    【重要：輸入資料】
+    1. 機場: ${prefs.airport} (座標: ${airportCoords.lat}, ${airportCoords.lng})
+    2. 住宿表: 
     ${hotelSchedule}
-
-    【參數】
-    總天數: ${totalDays} 天 (${prefs.dates.start} ~ ${prefs.dates.end})
-    人數: ${prefs.travelers}
-    預算: ${prefs.budget.amount} ${prefs.budget.currency}
-    風格: ${prefs.style.focus}
-
-    【候選名單 (已鎖定日期)】
+    3. **候選景點列表 (已鎖定日期與地理位置)**:
     ${JSON.stringify(minimizedCandidates)}
 
-    【輸出要求】
-    請回傳符合以下 Schema 的標準 JSON (無 Markdown):
+    【核心規則 - 違反即失敗】
+    1. **地理圍欄 (Geo-Fencing)**: 候選列表中的 "day" 欄位是經過嚴格地理計算的結果。**你必須 100% 遵守該 day 分配**。
+    2. **禁止幻覺**: **只能使用** 上述候選列表中的景點。
+    3. **機場邏輯**: 
+       - Day 1 第一個活動必須是「抵達 ${prefs.airport} 並前往市區/飯店」。
+       - 最後一天最後一個活動必須是「前往 ${prefs.airport}」。
+    4. **預算控制**: 
+       - 總預算: ${prefs.budget.amount} ${prefs.budget.currency}。
+       - 請為每個活動估算真實的 cost (門票/餐飲) 與 transportCost (交通)。
+
+    【詳細欄位要求】
+    1. **duration (預估停留時間)**: 請根據活動性質估算遊覽時間（例如："1.5 小時", "2 小時", "45 分鐘"）。
+    2. **website (官方網站)**: 若候選列表中有 website 則使用之；若無，請嘗試透過 Google Search 尋找該景點的**官方網站**或**主要介紹頁面**。
+
+    【輸出 Schema】
     {
       "tripTitle": "標題",
-      "totalCostEstimate": 數字,
+      "totalCostEstimate": 數字 (必須 <= ${prefs.budget.amount}),
       "currency": "${prefs.budget.currency}",
       "summary": "總結",
       "days": [
         {
           "date": "YYYY-MM-DD",
-          "dayNumber": 數字,
-          "summary": "當日主題 (例如: 東京探索)",
+          "dayNumber": 1,
+          "summary": "主題",
           "activities": [
             {
-              "time": "HH:MM",
+              "time": "10:00",
               "placeName": "名稱",
               "description": "描述",
-              "reasoning": "為何選此處",
-              "matchTags": ["標籤"],
-              "cost": 數字,
+              "duration": "例如: 1.5 小時", 
+              "website": "官方網站URL",
+              "reasoning": "為何選此",
+              "cost": 數字 (若免費填 0),
               "transportMethod": "交通方式",
-              "transportCost": 數字,
+              "transportCost": 數字 (必填，若無填 0),
               "transportTimeMinutes": 數字,
               "googleMapsUri": "URL",
-              "rating": "4.5",
-              "isMeal": boolean,
-              "latitude": number,
-              "longitude": number
+              "latitude": 數字,
+              "longitude": 數字,
+              "isMeal": boolean
             }
           ]
         }
       ]
     }
+    只回傳 JSON。
   `;
 
   try {
@@ -225,11 +241,19 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     
     const data = JSON.parse(cleanJsonString(text)) as ItineraryResult;
     
-    // Inject consistency data
+    // Safety Fallback: Ensure travelers count exists
     data.travelers = prefs.travelers;
-    if (data.currency !== prefs.budget.currency) {
-        data.currency = prefs.budget.currency;
-    }
+    if (data.currency !== prefs.budget.currency) data.currency = prefs.budget.currency;
+
+    // Safety Fallback
+    data.days.forEach(d => {
+        d.activities.forEach(a => {
+            if (a.transportCost === undefined || a.transportCost === null) a.transportCost = 0;
+            if (a.cost === undefined || a.cost === null) a.cost = 0;
+            // Ensure duration string exists if missing
+            if (!a.duration) a.duration = "1 小時"; 
+        });
+    });
 
     return data;
 

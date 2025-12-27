@@ -1,4 +1,5 @@
 
+
 export interface Hotel {
   id: string;
   name: string;
@@ -47,6 +48,7 @@ export interface CandidatePlace {
   // 0=Sun, 1=Mon, ..., 6=Sat
   closedDays?: number[]; 
   openingText?: string; // e.g. "10:00 - 22:00"
+  website?: string; // New: Official website URL
 
   // Calculated fields
   score?: number;
@@ -63,6 +65,8 @@ export interface Activity {
   description: string;
   reasoning: string; // New: AI explains why this spot was ranked high
   matchTags: string[]; // New: e.g. ["高評價", "距離近", "符合預算"]
+  duration?: string; // New: Estimated duration (e.g. "1.5 小時")
+  website?: string; // New: Official URL
   cost: number;
   currency: string;
   transportMethod?: string;
