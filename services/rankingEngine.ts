@@ -21,11 +21,19 @@ const isDateInHotelStay = (dateObj: Date, checkInStr: string, checkOutStr: strin
     checkIn.setHours(0,0,0,0);
     checkOut.setHours(0,0,0,0);
     dateObj.setHours(0,0,0,0);
-    // Standard hotel logic: You are "at" the hotel from check-in night until check-out morning.
-    // However, for planning *activities*, we care about where you sleep *that night*.
-    // If check-in is Oct 1, check-out is Oct 3.
-    // Oct 1 night: Hotel A. Oct 2 night: Hotel A. Oct 3: Leaving Hotel A.
-    return dateObj >= checkIn && dateObj < checkOut;
+    // Logic: Stay covers the night of check-in up to (but not including) the night of check-out.
+    // e.g. IN: 1st, OUT: 3rd.
+    // 1st: Stay (True)
+    // 2nd: Stay (True)
+    // 3rd: Checkout (False - usually means we are moving or leaving)
+    return dateObj.getTime() >= checkIn.getTime() && dateObj.getTime() < checkOut.getTime();
+};
+
+// Helper: Parse time "HH:MM" to hours float
+const parseTime = (timeStr: string): number => {
+    if (!timeStr) return 9; 
+    const [h, m] = timeStr.split(':').map(Number);
+    return h + (m / 60);
 };
 
 export const rankCandidates = (
@@ -36,7 +44,6 @@ export const rankCandidates = (
 
   return candidates.map(place => {
     let score = 0;
-    const reasons: string[] = [];
 
     // 1. Rating
     const rating = place.rating || 4.0;
@@ -49,7 +56,7 @@ export const rankCandidates = (
     else if (place.category === 'sightseeing') matchScore = 70;
     score += matchScore * 0.4;
 
-    // 3. Distance Check (Calculate nearest hotel for general scoring)
+    // 3. Distance Check (Calculate nearest hotel)
     let minDistance = Infinity;
     hotels.forEach(h => {
         if (h.latitude && h.longitude && place.latitude && place.longitude) {
@@ -60,8 +67,8 @@ export const rankCandidates = (
 
     if (minDistance !== Infinity) {
         place.distanceFromHotel = parseFloat(minDistance.toFixed(2));
-        // Penalize heavily if super far (> 100km) from ANY hotel, unless it's a specific key destination
-        if (minDistance > 100) score -= 300; 
+        // Penalize heavily if very far, but don't exclude yet
+        if (minDistance > 100) score -= 200; 
         else score += Math.max(0, (1 - minDistance / 30) * 100) * 0.2;
     } else {
         score -= 50; 
@@ -72,13 +79,6 @@ export const rankCandidates = (
   }).sort((a, b) => (b.score || 0) - (a.score || 0));
 };
 
-// Helper: Parse time "HH:MM" to hours float
-const parseTime = (timeStr: string): number => {
-    if (!timeStr) return 9; // Default 9 AM
-    const [h, m] = timeStr.split(':').map(Number);
-    return h + (m / 60);
-};
-
 export const optimizeRoute = (
   candidates: CandidatePlace[],
   hotels: Hotel[],
@@ -87,19 +87,17 @@ export const optimizeRoute = (
   airportCoords?: { lat: number, lng: number },
   flightTimes?: { start: string, end: string }
 ): CandidatePlace[] => {
-  if (candidates.length === 0) return [];
-
   const finalOrderedList: CandidatePlace[] = [];
   const unvisited = [...candidates];
   const startDate = new Date(startDateStr);
+  startDate.setHours(0,0,0,0);
 
-  // Time Logic
+  // Flight Constraints
   const arrivalTime = flightTimes ? parseTime(flightTimes.start) : 10;
   const departureTime = flightTimes ? parseTime(flightTimes.end) : 18;
 
   // Pace Logic (Hours per spot)
   const paceMap = { relaxed: 2.5, moderate: 1.8, intense: 1.2 };
-  // Default duration if API didn't provide one
   const defaultDuration = 1.5; 
 
   for (let dayNum = 1; dayNum <= totalDays; dayNum++) {
@@ -107,175 +105,178 @@ export const optimizeRoute = (
     currentDate.setDate(startDate.getDate() + (dayNum - 1));
     const currentDayOfWeek = currentDate.getDay();
 
-    // 1. Identify Active Hotel for this NIGHT
-    // If it's the last day, we technically don't sleep there, but we start from the previous night's hotel.
+    // 1. Determine "Base" Location (Where we sleep TONIGHT)
+    // If it's the last day, we assume we just checked out from the previous night's hotel.
     let activeHotel = hotels.find(h => isDateInHotelStay(currentDate, h.checkIn, h.checkOut));
     
-    // Fallback: If no hotel found (e.g., last day or date gap), use the closest logical hotel
+    // Fallback for last day or gaps: Use the hotel we checked out of this morning
     if (!activeHotel) {
-        // If it's the very last day, use the hotel where we checked out this morning
-        if (dayNum === totalDays) {
-            activeHotel = hotels.find(h => new Date(h.checkOut).getTime() === currentDate.getTime());
-        }
-        if (!activeHotel) activeHotel = hotels[hotels.length - 1]; // Absolute fallback
+        // Find hotel where checkOut == today
+        activeHotel = hotels.find(h => {
+            const out = new Date(h.checkOut);
+            out.setHours(0,0,0,0);
+            return out.getTime() === currentDate.getTime();
+        });
+        // Ultimate fallback
+        if (!activeHotel) activeHotel = hotels[hotels.length - 1];
     }
 
-    // 2. Define Time Budget
-    let currentTime = 9.0; // Default start time 9 AM
-    let maxTime = 20.0; // Default end time 8 PM
+    // 2. Define Time Budget for Activities
+    let currentTime = 9.0; // Standard Start
+    let maxTime = 20.0; // Standard End (Dinner time)
 
+    // Day 1: Constraint by Arrival
     if (dayNum === 1) {
-        // Day 1: Start later due to flight
-        currentTime = Math.max(arrivalTime + 2, 9); // +2 hours for immigration/transport
+        // Flight landing + 2h immigration/transport
+        currentTime = Math.max(arrivalTime + 2.0, 9.0);
     }
+    // Last Day: Constraint by Departure
     if (dayNum === totalDays) {
-        // Last Day: End earlier for flight
-        maxTime = Math.min(departureTime - 3, 20); // -3 hours for transport/check-in
+        // Flight takeoff - 3h (checkin + transport)
+        maxTime = Math.min(departureTime - 3.0, 20.0);
     }
 
-    // If no time left (e.g. late arrival), skip strictly but maybe add a "Dinner" spot if possible
-    if (currentTime >= maxTime) {
-        // Force at least one "Late Night" spot if it's Day 1 arrival
-        if (dayNum === 1) maxTime = 23; 
-        else continue; 
+    // Check if we have ANY time window
+    const availableHours = maxTime - currentTime;
+    
+    // Special marker for "Travel Day Only"
+    if (availableHours < 1.0) {
+         // No time for spots. Just travel.
+         // We add a dummy placeholder to ensure the day exists in the structure
+         finalOrderedList.push({
+             name: dayNum === 1 ? "抵達並前往飯店休息" : "前往機場準備搭機",
+             category: 'other',
+             rating: 0,
+             reviewCount: 0,
+             priceLevel: 0,
+             latitude: airportCoords?.lat || 0,
+             longitude: airportCoords?.lng || 0,
+             description: "Travel Time",
+             suggestedDay: dayNum,
+             matchReason: "時間緊迫，純移動行程",
+             openingText: "",
+             durationHours: 0
+         });
+         continue;
     }
 
-    // 3. Determine Start Location for Greedy Search
+    // 3. Current Location Tracker (Simulate movement)
     let currentLoc = { lat: activeHotel.latitude || 0, lng: activeHotel.longitude || 0 };
-    let startLocationName = activeHotel.name;
-
-    // Day 1 overrides: Start from Airport
+    
+    // If Day 1, start from Airport
     if (dayNum === 1 && airportCoords && airportCoords.lat !== 0) {
         currentLoc = airportCoords;
-        startLocationName = "機場";
     }
 
-    // 4. Filter Available Spots for THIS Day
-    // Criteria: 
-    // - Not visited
-    // - Open on this day
-    // - Within acceptable range of the HOTEL (not the airport, unless Day 1)
-    // - Day 1 exception: Can be near Airport OR Hotel
-    const MAX_RADIUS = 40; // km
+    // 4. Select Candidates
+    // Radius Logic:
+    // If Day 1 (Airport -> Hotel), we can pick spots near Airport OR Hotel.
+    // If Normal Day, pick spots near Hotel (radius 20km).
+    // If Transition Day (Check out A -> Check in B), we might want spots near A or B.
+    
+    const MAX_RADIUS = 30; // km
 
-    let todaysPool = unvisited.filter(p => {
-       if (p.closedDays && p.closedDays.includes(currentDayOfWeek)) return false;
-       
-       // Distance Check
-       let dist = 999;
-       if (activeHotel.latitude && activeHotel.longitude && p.latitude && p.longitude) {
-           dist = calculateDistance(activeHotel.latitude, activeHotel.longitude, p.latitude, p.longitude);
-       }
-       
-       // Strict geo-fencing: Activity must be near the hotel we are staying at
-       if (dist > MAX_RADIUS) {
-           // Exception: Day 1, maybe it's near the airport?
-           if (dayNum === 1 && airportCoords) {
-               const distToAirport = calculateDistance(airportCoords.lat, airportCoords.lng, p.latitude, p.longitude);
-               if (distToAirport < 30) {
-                   p.distanceFromHotel = parseFloat(dist.toFixed(1)); // Hack: store dist
-                   return true;
-               }
-           }
-           return false;
-       }
-       
-       p.distanceFromHotel = parseFloat(dist.toFixed(1));
-       return true;
+    const todaysCandidates = unvisited.filter(p => {
+        if (p.closedDays && p.closedDays.includes(currentDayOfWeek)) return false;
+        
+        let dist = 999;
+        if (activeHotel.latitude && activeHotel.longitude && p.latitude && p.longitude) {
+            dist = calculateDistance(activeHotel.latitude, activeHotel.longitude, p.latitude, p.longitude);
+        }
+
+        // Special check for Day 1: Also allow spots near Airport
+        if (dayNum === 1 && airportCoords) {
+             const distAirport = calculateDistance(airportCoords.lat, airportCoords.lng, p.latitude, p.longitude);
+             if (distAirport < 20) dist = distAirport; // Allow if close to airport
+        }
+
+        p.distanceFromHotel = parseFloat(dist.toFixed(1));
+        
+        // Relax radius if we are running low on candidates
+        const effectiveRadius = unvisited.length < 10 ? 100 : MAX_RADIUS;
+        
+        return dist <= effectiveRadius;
     });
 
-    // Sort pool by score initially to prefer better spots
-    todaysPool.sort((a, b) => (b.score || 0) - (a.score || 0));
+    // 5. Greedy Selection
+    let spotsAdded = 0;
+    while (currentTime < maxTime && todaysCandidates.length > 0) {
+         // Find closest to currentLoc
+         let bestIdx = -1;
+         let minDist = Infinity;
 
-    // 5. Greedy Selection Loop
-    // We want to fill [currentTime] to [maxTime]
-    let dayHasActivity = false;
+         for (let i=0; i < todaysCandidates.length; i++) {
+             const cand = todaysCandidates[i];
+             const d = calculateDistance(currentLoc.lat, currentLoc.lng, cand.latitude, cand.longitude);
+             
+             // Weighted score: Distance is bad, High Rating is good.
+             // Heuristic: d - (score/20)
+             const weight = d - ((cand.score || 0) / 20);
 
-    while (currentTime < maxTime && todaysPool.length > 0) {
-        let bestIdx = -1;
-        let minScoreMetric = Infinity; // We want to minimize (Distance / Score) roughly
+             if (weight < minDist) {
+                 minDist = weight;
+                 bestIdx = i;
+             }
+         }
 
-        // Simple Greedy: Find closest available spot to currentLoc
-        let minMoveDist = Infinity;
+         if (bestIdx !== -1) {
+             const chosen = todaysCandidates[bestIdx];
+             const travelTime = (minDist / 30) + 0.3; // hr
+             const duration = chosen.durationHours || defaultDuration;
 
-        for (let i = 0; i < todaysPool.length; i++) {
-            const cand = todaysPool[i];
-            const moveDist = calculateDistance(currentLoc.lat, currentLoc.lng, cand.latitude, cand.longitude);
-            
-            // Optimization: Prefer closer spots, but weight by rating slightly
-            // If Spot A is 2km away (Score 50) and Spot B is 2.5km away (Score 90), pick B.
-            // Weighted Dist = Real Dist - (Score / 20)
-            const weightedDist = moveDist - ((cand.score || 0) / 40);
+             if (currentTime + travelTime + duration > maxTime + 0.5) {
+                 // Too long, skip this one, try finding a smaller one?
+                 // For simplicity, just remove it from today's pool and continue
+                 todaysCandidates.splice(bestIdx, 1);
+                 continue;
+             }
 
-            if (weightedDist < minScoreMetric) {
-                minScoreMetric = weightedDist;
-                minMoveDist = moveDist;
-                bestIdx = i;
-            }
-        }
-
-        if (bestIdx !== -1) {
-            const chosen = todaysPool[bestIdx];
-            
-            // Estimate costs
-            const travelTimeHours = (minMoveDist / 30) + 0.2; // 30km/h avg speed + buffer
-            const visitDuration = chosen.durationHours || defaultDuration;
-
-            // Check if fits in day
-            if (currentTime + travelTimeHours + visitDuration > maxTime + 0.5) { // 0.5h flex
-                // Doesn't fit, remove from pool for today, try next closest?
-                // Actually, for simple greedy, we just stop or skip. 
-                // Let's remove and try finding a smaller one? No, just break to avoid infinite loops.
-                todaysPool.splice(bestIdx, 1); 
-                continue; 
-            }
-
-            // Commit
-            chosen.suggestedDay = dayNum;
-            chosen.matchReason = `Day ${dayNum} (從${startLocationName}出發)`;
-            finalOrderedList.push(chosen);
-
-            // Update state
-            currentTime += travelTimeHours + visitDuration;
-            currentLoc = { lat: chosen.latitude, lng: chosen.longitude };
-            startLocationName = chosen.name;
-            dayHasActivity = true;
-
-            // Remove from global unvisited
-            const globalIdx = unvisited.findIndex(u => u.name === chosen.name);
-            if (globalIdx !== -1) unvisited.splice(globalIdx, 1);
-            todaysPool.splice(bestIdx, 1);
-
-        } else {
-            break; // No reachable candidates
-        }
+             // Commit
+             chosen.suggestedDay = dayNum;
+             chosen.matchReason = `Day ${dayNum} (從${spotsAdded === 0 ? (dayNum===1 ? '機場/飯店' : '飯店') : '上一景點'}出發)`;
+             finalOrderedList.push(chosen);
+             
+             // Update logic
+             currentTime += travelTime + duration;
+             currentLoc = { lat: chosen.latitude, lng: chosen.longitude };
+             spotsAdded++;
+             
+             // Remove from global unvisited
+             const gIdx = unvisited.findIndex(u => u.name === chosen.name);
+             if (gIdx !== -1) unvisited.splice(gIdx, 1);
+             todaysCandidates.splice(bestIdx, 1);
+         } else {
+             break;
+         }
     }
 
-    // FAILSAFE: If a day has NO activity (e.g. strict time, or bad filtering), 
-    // Force add the single CLOSEST spot from unvisited, ignoring time limits, 
-    // just to ensure the day isn't empty.
-    if (!dayHasActivity && unvisited.length > 0) {
-        let backupIdx = -1;
-        let backupDist = Infinity;
-        
-        for(let i=0; i<unvisited.length; i++) {
-             const u = unvisited[i];
-             // Check distance to hotel
-             if (activeHotel.latitude && activeHotel.longitude) {
-                 const d = calculateDistance(activeHotel.latitude, activeHotel.longitude, u.latitude, u.longitude);
-                 if (d < backupDist) {
-                     backupDist = d;
-                     backupIdx = i;
-                 }
-             }
-        }
-
-        if (backupIdx !== -1) {
-             const rescue = unvisited[backupIdx];
-             rescue.suggestedDay = dayNum;
-             rescue.matchReason = `Day ${dayNum} (自動補充行程)`;
-             finalOrderedList.push(rescue);
-             unvisited.splice(backupIdx, 1);
+    // 6. NO EMPTY DAYS POLICY
+    // If the algorithm failed to find ANY spots (e.g. strict time or bad location match),
+    // We MUST force a placeholder so the prompt knows to generate something generic.
+    if (spotsAdded === 0) {
+        // Try to steal *any* remaining candidate regardless of distance
+        if (unvisited.length > 0) {
+             const backup = unvisited[0];
+             backup.suggestedDay = dayNum;
+             backup.matchReason = `Day ${dayNum} (補位行程)`;
+             finalOrderedList.push(backup);
+             unvisited.shift();
+        } else {
+            // No candidates left at all. Create a virtual one.
+            finalOrderedList.push({
+                name: "當日自由探索 (AI自動推薦)",
+                category: 'other',
+                rating: 0,
+                reviewCount: 0,
+                priceLevel: 0,
+                latitude: activeHotel.latitude || 0,
+                longitude: activeHotel.longitude || 0,
+                description: "Relaxed exploration",
+                suggestedDay: dayNum,
+                matchReason: "無特定演算法推薦",
+                openingText: "",
+                durationHours: 2
+            });
         }
     }
   }
