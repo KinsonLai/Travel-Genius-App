@@ -18,7 +18,6 @@ const cleanJsonString = (str: string) => {
 const deduplicateCandidates = (candidates: CandidatePlace[]): CandidatePlace[] => {
     const seen = new Set();
     return candidates.filter(c => {
-        // Fix: Add safety check for undefined name or object
         if (!c || !c.name) return false;
         const key = c.name.toLowerCase().trim();
         if (seen.has(key)) return false;
@@ -27,8 +26,27 @@ const deduplicateCandidates = (candidates: CandidatePlace[]): CandidatePlace[] =
     });
 };
 
+// Helper to safely get API Key in Vite environment
+const getApiKey = () => {
+    // 優先嘗試 Vite 的環境變數
+    const meta = import.meta as any;
+    if (meta && meta.env && meta.env.VITE_API_KEY) {
+        return meta.env.VITE_API_KEY;
+    }
+    // Fallback if process.env is shimmed
+    try {
+        if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+            return process.env.API_KEY;
+        }
+    } catch(e) {}
+    return "";
+};
+
 export const generateItinerary = async (prefs: UserPreferences): Promise<ItineraryResult> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error("API Key 未設定。請確認 .env 檔案中包含 VITE_API_KEY");
+
+  const ai = new GoogleGenAI({ apiKey });
 
   const start = new Date(prefs.dates.start);
   const end = new Date(prefs.dates.end);
