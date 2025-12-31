@@ -1,6 +1,6 @@
 
 import { GoogleGenAI } from "@google/genai";
-import { UserPreferences, ItineraryResult, CandidatePlace, Hotel } from "../types";
+import { UserPreferences, ItineraryResult, CandidatePlace, Hotel, DayPlan } from "../types";
 import { rankCandidates, optimizeRoute } from "./rankingEngine";
 
 const cleanJsonString = (str: string) => {
@@ -24,22 +24,88 @@ const deduplicateCandidates = (candidates: CandidatePlace[]): CandidatePlace[] =
     });
 };
 
+// Robust API Key Retrieval
 const getApiKey = () => {
     const meta = import.meta as any;
-    if (meta && meta.env && meta.env.VITE_API_KEY) {
-        return meta.env.VITE_API_KEY;
+    let key = "";
+
+    // 1. Try Standard Vite Env
+    if (meta.env && meta.env.VITE_API_KEY) {
+        key = meta.env.VITE_API_KEY;
+    } 
+    // 2. Try process.env (Standard Node/Webpack fallback)
+    else if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+        key = process.env.API_KEY;
     }
-    try {
-        if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
-            return process.env.API_KEY;
+    // 3. Try generic VITE_ key via process (sometimes necessary in specific pipelines)
+    else if (typeof process !== 'undefined' && process.env && process.env.VITE_API_KEY) {
+        key = process.env.VITE_API_KEY;
+    }
+
+    // Debugging for Netlify (Will show in Browser Console)
+    if (!key) {
+        console.error("API Key Search Failed. Checked: import.meta.env.VITE_API_KEY, process.env.API_KEY");
+        console.log("Current import.meta.env:", JSON.stringify(meta.env || {}, null, 2));
+    }
+
+    return key;
+};
+
+// New: Ensure every day exists in the result
+const sanitizeItineraryDates = (data: ItineraryResult, startStr: string, totalDays: number): ItineraryResult => {
+    const startDate = new Date(startStr);
+    const correctedDays: DayPlan[] = [];
+
+    for (let i = 1; i <= totalDays; i++) {
+        // Calculate expected date string YYYY-MM-DD
+        const d = new Date(startDate);
+        d.setDate(startDate.getDate() + (i - 1));
+        // Handle timezone offset simply by string manipulation or UTC to avoid shifts
+        const dateStr = d.toISOString().split('T')[0];
+
+        // Find if AI generated this day
+        const existingDay = data.days.find(day => day.dayNumber === i);
+
+        if (existingDay) {
+            correctedDays.push({
+                ...existingDay,
+                date: dateStr // Force correct date format
+            });
+        } else {
+            // AI missed a day! Inject placeholder.
+            console.warn(`AI missing Day ${i}, injecting placeholder.`);
+            correctedDays.push({
+                dayNumber: i,
+                date: dateStr,
+                summary: "自由探索日 (AI 自動補全)",
+                activities: [
+                    {
+                        time: "10:00",
+                        placeName: "市區自由活動",
+                        description: "探索當地街道、咖啡廳或根據當下心情安排。",
+                        reasoning: "保留彈性時間，享受漫遊樂趣。",
+                        matchTags: ["彈性", "休閒"],
+                        duration: "4 小時",
+                        cost: 0,
+                        currency: data.currency,
+                        latitude: 0,
+                        longitude: 0,
+                        isMeal: false
+                    }
+                ]
+            });
         }
-    } catch(e) {}
-    return "";
+    }
+    
+    // Sort by day number
+    correctedDays.sort((a, b) => a.dayNumber - b.dayNumber);
+    data.days = correctedDays;
+    return data;
 };
 
 export const generateItinerary = async (prefs: UserPreferences): Promise<ItineraryResult> => {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("API Key 未設定。請確認 .env 檔案中包含 VITE_API_KEY");
+  if (!apiKey) throw new Error("API Key 未讀取到。請確認 Netlify 環境變數設為 'VITE_API_KEY'。");
 
   const ai = new GoogleGenAI({ apiKey });
 
@@ -77,7 +143,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   const hotelTasks = prefs.hotels.map(async (hotel) => {
       // Increased from 15 to 20 to ensure pool is large enough
       const prompt = `
-        任務：針對住宿點「${hotel.name}」(${hotel.location}) 搜尋 20 個適合的旅遊地點(景點/餐廳)。
+        任務：針對住宿點「${hotel.name}」(${hotel.location}) 搜尋 25 個適合的旅遊地點(景點/餐廳)。
         ${customKeywords.length > 0 ? `優先包含這些地點: ${customKeywords.join(', ')}` : ''}
         
         【關鍵要求】
@@ -107,7 +173,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
 
   // STAGE 2: Ranking & Route Optimization
   const rankedCandidates = rankCandidates(allCandidates, prefs, prefs.hotels);
-  const topCandidates = rankedCandidates.slice(0, 50); // Use top 50
+  const topCandidates = rankedCandidates.slice(0, 60); // Use top 60 to prevent running out
   
   console.log(`Optimization: Processing ${topCandidates.length} spots.`);
 
@@ -170,7 +236,9 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     任務：產生 JSON 行程。
 
     【硬性約束 - 絕不可違反】
-    1. **完整日期**: 行程必須完整包含從 Day 1 到 Day ${totalDays} 的每一天。絕不可跳過任何一天。
+    1. **完整日期**: 行程必須完整包含從 Day 1 到 Day ${totalDays} 的每一天。
+       請檢查以下日期列表，一天都不能少：
+       ${dateListStr}
     2. **班機時間**:
        - Day 1: ${prefs.dates.startTime} 抵達。此前不可排活動。
        - Day ${totalDays}: ${prefs.dates.endTime} 起飛。起飛前 3 小時需抵達機場。
@@ -185,6 +253,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     1. 依照骨架填寫詳細內容。
     2. 若骨架某日標註為「無特定推薦」，請務必**自動生成**當日的行程，不可留白。
     3. 每個活動請填寫 "duration" (例如 "2 小時")。
+    4. 確保 Day 1 到 Day ${totalDays} 都有資料。
 
     【輸出 Schema】
     {
@@ -194,7 +263,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
       "summary": "總結",
       "days": [
         {
-          "date": "YYYY-MM-DD", // 必須對應 ${dateListStr}
+          "date": "YYYY-MM-DD",
           "dayNumber": 1,
           "summary": "主題",
           "activities": [
@@ -231,13 +300,10 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
     const text = resp3.text;
     if (!text) throw new Error("No response from Gemini Stage 3");
     
-    const data = JSON.parse(cleanJsonString(text)) as ItineraryResult;
+    let data = JSON.parse(cleanJsonString(text)) as ItineraryResult;
     
-    // Safety: Ensure all days exist
-    if (!data.days || data.days.length < totalDays) {
-        console.warn("Gemini missed some days, attempting to patch...");
-        // Simple patch logic could go here, but prompt engineering should prevent this.
-    }
+    // Critical Fix: Sanitize dates to ensure no day is missing
+    data = sanitizeItineraryDates(data, prefs.dates.start, totalDays);
 
     data.travelers = prefs.travelers;
     if (data.currency !== prefs.budget.currency) data.currency = prefs.budget.currency;
