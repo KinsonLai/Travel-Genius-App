@@ -1,5 +1,4 @@
 
-
 export interface Hotel {
   id: string;
   name: string;
@@ -49,6 +48,9 @@ export interface CandidatePlace {
   closedDays?: number[]; 
   openingText?: string; // e.g. "10:00 - 22:00"
   website?: string; // New: Official website URL
+  
+  // Internal Calculation fields
+  durationHours?: number; // Estimated hours to spend here (numeric)
 
   // Calculated fields
   score?: number;
