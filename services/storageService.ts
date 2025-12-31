@@ -1,11 +1,14 @@
+
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, setDoc, getDoc } from "firebase/firestore";
 import { ItineraryResult } from "../types";
 
 // Helper to safely get env vars using ONLY standard Vite import.meta.env
 const getEnv = (viteKey: string) => {
-  if (import.meta.env && import.meta.env[viteKey]) {
-    return import.meta.env[viteKey];
+  // Fix TS error: Property 'env' does not exist on type 'ImportMeta'
+  const meta = import.meta as any;
+  if (meta.env && meta.env[viteKey]) {
+    return meta.env[viteKey];
   }
   return "";
 };

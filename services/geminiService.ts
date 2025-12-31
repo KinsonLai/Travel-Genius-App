@@ -18,6 +18,8 @@ const cleanJsonString = (str: string) => {
 const deduplicateCandidates = (candidates: CandidatePlace[]): CandidatePlace[] => {
     const seen = new Set();
     return candidates.filter(c => {
+        // Fix: Add safety check for undefined name or object
+        if (!c || !c.name) return false;
         const key = c.name.toLowerCase().trim();
         if (seen.has(key)) return false;
         seen.add(key);
@@ -26,10 +28,7 @@ const deduplicateCandidates = (candidates: CandidatePlace[]): CandidatePlace[] =
 };
 
 export const generateItinerary = async (prefs: UserPreferences): Promise<ItineraryResult> => {
-  const apiKey = import.meta.env.VITE_API_KEY;
-  if (!apiKey) throw new Error("API Key 未設定。");
-
-  const ai = new GoogleGenAI({ apiKey });
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
   const start = new Date(prefs.dates.start);
   const end = new Date(prefs.dates.end);
@@ -47,7 +46,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   `;
   try {
      const airportResp = await ai.models.generateContent({
-         model: "gemini-flash-latest",
+         model: "gemini-3-flash-preview",
          contents: airportPrompt,
          config: { tools: [{ googleSearch: {} }] }
      });
@@ -66,7 +65,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
         Return JSON: {"places": ["Place A", "Place B"]}
       `;
       try {
-          const kwResp = await ai.models.generateContent({ model: "gemini-flash-latest", contents: extractPrompt });
+          const kwResp = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: extractPrompt });
           const kwJson = JSON.parse(cleanJsonString(kwResp.text || "{}"));
           customKeywords = kwJson.places || [];
       } catch(e) {}
@@ -93,7 +92,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
       `;
       try {
           const resp = await ai.models.generateContent({
-              model: "gemini-flash-latest", 
+              model: "gemini-3-flash-preview", 
               contents: prompt,
               config: { tools: [{ googleSearch: {} }] }
           });
@@ -113,7 +112,7 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
       `;
       try {
         const resp = await ai.models.generateContent({
-            model: "gemini-flash-latest", 
+            model: "gemini-3-flash-preview", 
             contents: prompt,
             config: { tools: [{ googleSearch: {} }] }
         });
@@ -164,8 +163,6 @@ export const generateItinerary = async (prefs: UserPreferences): Promise<Itinera
   const hotelSchedule = prefs.hotels.map((h, i) => 
       `Day ? (Check-in ${h.checkIn}): 住 ${h.name}`
   ).join('\n');
-
-  const budgetPerDay = Math.floor(prefs.budget.amount / totalDays);
 
   const step3Prompt = `
     角色：嚴格的旅行會計師與導遊。
